@@ -8,7 +8,7 @@ use regex::Regex;
 use serde::Deserialize;
 use tera::{Context, Tera};
 
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 pub struct Config {
     #[serde(default)]
     pub props: toml::map::Map<String, toml::Value>,
@@ -22,7 +22,7 @@ impl Config {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Rule {
     File {
@@ -45,18 +45,10 @@ pub enum Rule {
     },
 }
 
-fn create_dir_all(path: &Path) -> Result<(), Error> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-
-    fs::create_dir_all(parent).map_err(Error::IOError)
-}
-
 #[derive(Debug)]
 pub enum Error {
-    IOError(io::Error),
     Tera(tera::Error),
+    IOError(io::Error),
 }
 
 pub fn generate(
@@ -64,73 +56,151 @@ pub fn generate(
     config: &Config,
     overrides: Option<toml::map::Map<String, toml::Value>>,
 ) -> Result<(), Error> {
+    let mut config = config.clone();
+
+    render_config_props(&mut config)
+        .and_then(|c| apply_overrides(c, overrides))
+        .and_then(render_config_rules)
+        .and_then(|c| extend_paths(c, root))
+        .and_then(generate_files)
+}
+
+fn apply_overrides(
+    config: &mut Config,
+    overrides: Option<toml::map::Map<String, toml::Value>>,
+) -> Result<&mut Config, Error> {
+    if let Some(overrides) = overrides {
+        config.props.extend(overrides);
+    }
+    Ok(config)
+}
+
+pub fn render_config_props(config: &mut Config) -> Result<&mut Config, Error> {
+    render_config_props_with_func(config, |_, _| {})
+}
+
+pub fn render_config_props_with_func(
+    config: &mut Config,
+    mut func: impl FnMut(&String, &mut toml::Value),
+) -> Result<&mut Config, Error> {
     let mut tera = Tera::default();
 
     let mut context = Context::new();
 
-    for (key, val) in config.props.iter() {
-        match val {
-            toml::Value::String(s) => {
-                let res = tera.render_str(s, &context).map_err(Error::Tera)?;
-                context.insert(key, &res);
+    for (key, val) in config.props.iter_mut() {
+        if let toml::Value::String(s) = val {
+            *s = tera.render_str(s, &context).map_err(Error::Tera)?;
+        }
+        func(key, val);
+        context.insert(key, val);
+    }
+
+    Ok(config)
+}
+
+pub fn render_config_rules(config: &mut Config) -> Result<&mut Config, Error> {
+    let mut tera = Tera::default();
+
+    let context = Context::from_serialize(&config.props).map_err(Error::Tera)?;
+
+    for rule in config.rules.iter_mut() {
+        match rule {
+            Rule::File { path, content } => {
+                *path = tera.render_str(path, &context).map_err(Error::Tera)?;
+
+                *content = tera.render_str(content, &context).map_err(Error::Tera)?;
             }
-            _ => context.insert(key, val),
+            Rule::Append { path, content } => {
+                *path = tera.render_str(path, &context).map_err(Error::Tera)?;
+
+                *content = tera.render_str(content, &context).map_err(Error::Tera)?;
+            }
+            Rule::Prepend { path, content } => {
+                *path = tera.render_str(path, &context).map_err(Error::Tera)?;
+
+                *content = tera.render_str(content, &context).map_err(Error::Tera)?;
+            }
+            Rule::Replace {
+                path,
+                replace: _,
+                content,
+            } => {
+                *path = tera.render_str(path, &context).map_err(Error::Tera)?;
+
+                *content = tera.render_str(content, &context).map_err(Error::Tera)?;
+            }
         }
     }
 
-    if let Some(overrides) = overrides {
-        context.extend(Context::from_serialize(overrides).map_err(Error::Tera)?);
+    Ok(config)
+}
+
+pub fn extend_paths<'a>(config: &'a mut Config, root: &Path) -> Result<&'a mut Config, Error> {
+    for rule in config.rules.iter_mut() {
+        match rule {
+            Rule::File { path, content: _ } => {
+                *path = root.join(path.as_str()).to_string_lossy().to_string();
+            }
+            Rule::Append { path, content: _ } => {
+                *path = root.join(path.as_str()).to_string_lossy().to_string();
+            }
+            Rule::Prepend { path, content: _ } => {
+                *path = root.join(path.as_str()).to_string_lossy().to_string();
+            }
+            Rule::Replace {
+                path,
+                replace: _,
+                content: _,
+            } => {
+                *path = root.join(path.as_str()).to_string_lossy().to_string();
+            }
+        }
     }
 
+    Ok(config)
+}
+
+pub fn generate_files(config: &mut Config) -> Result<(), Error> {
     for rule in config.rules.iter() {
         match rule {
             Rule::File { path, content } => {
-                let path = tera.render_str(path, &context).map_err(Error::Tera)?;
-                let path = root.join(path.as_str());
-                create_dir_all(&path)?;
+                let path = Path::new(path);
+                create_dir_all(path)?;
                 let mut file = fs::File::options()
                     .create_new(true)
                     .write(true)
-                    .open(&path)
+                    .open(path)
                     .map_err(Error::IOError)?;
 
-                let rendered = tera.render_str(content, &context).map_err(Error::Tera)?;
-
-                writeln!(&mut file, "{}", rendered.trim_end()).map_err(Error::IOError)?;
+                writeln!(&mut file, "{}", content.trim_end()).map_err(Error::IOError)?;
             }
             Rule::Append { path, content } => {
-                let path = tera.render_str(path, &context).map_err(Error::Tera)?;
-                let path = root.join(path.as_str());
-                create_dir_all(&path)?;
+                let path = Path::new(path);
+                create_dir_all(path)?;
                 let mut file = fs::File::options()
                     .create(true)
                     .append(true)
-                    .open(&path)
+                    .open(path)
                     .map_err(Error::IOError)?;
 
-                let rendered = tera.render_str(content, &context).map_err(Error::Tera)?;
-
-                writeln!(&mut file, "{}", rendered.trim_end()).map_err(Error::IOError)?;
+                writeln!(&mut file, "{}", content.trim_end()).map_err(Error::IOError)?;
             }
             Rule::Prepend { path, content } => {
-                let path = tera.render_str(path, &context).map_err(Error::Tera)?;
-                let path = root.join(path.as_str());
-                create_dir_all(&path)?;
+                let path = Path::new(path);
+                create_dir_all(path)?;
                 let mut file = fs::File::options()
                     .create(true)
                     .truncate(false)
                     .read(true)
                     .write(true)
-                    .open(&path)
+                    .open(path)
                     .map_err(Error::IOError)?;
                 let mut file_content = String::new();
                 file.read_to_string(&mut file_content)
                     .map_err(Error::IOError)?;
                 file.seek(io::SeekFrom::Start(0)).map_err(Error::IOError)?;
 
-                let rendered = tera.render_str(content, &context).map_err(Error::Tera)?;
-
-                writeln!(&mut file, "{}\n{}", rendered, file_content.trim_end())
+                writeln!(&mut file, "{}\n{}", content, file_content.trim_end())
                     .map_err(Error::IOError)?;
             }
             Rule::Replace {
@@ -138,16 +208,15 @@ pub fn generate(
                 replace,
                 content,
             } => {
-                let path = tera.render_str(path, &context).map_err(Error::Tera)?;
-                let path = root.join(path.as_str());
-                create_dir_all(&path)?;
+                let path = Path::new(path);
+                create_dir_all(path)?;
                 let file_content = {
                     let mut file = fs::File::options()
                         .create(true)
                         .read(true)
                         .write(true)
                         .truncate(false)
-                        .open(&path)
+                        .open(path)
                         .map_err(Error::IOError)?;
                     let mut file_content = String::new();
                     file.read_to_string(&mut file_content)
@@ -158,17 +227,23 @@ pub fn generate(
                     .create(true)
                     .write(true)
                     .truncate(true)
-                    .open(&path)
+                    .open(path)
                     .map_err(Error::IOError)?;
 
-                let rendered = tera.render_str(content, &context).map_err(Error::Tera)?;
-
-                let replaced = replace.replacen(&file_content, 1, rendered);
+                let replaced = replace.replacen(&file_content, 1, content);
                 writeln!(&mut file, "{}", replaced.trim_end()).map_err(Error::IOError)?;
             }
         }
     }
     Ok(())
+}
+
+fn create_dir_all(path: &Path) -> Result<(), Error> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+
+    fs::create_dir_all(parent).map_err(Error::IOError)
 }
 
 #[cfg(test)]

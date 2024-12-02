@@ -10,19 +10,17 @@ license = "MIT"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = { version = "4.5.21", optional = true }
+clap = { version = "4.5.21", features = ["derive"], optional = true }
 regex = "1.11.1"
 serde = { version = "1.0.215", features = ["derive"] }
 serde_regex = "1.1.0"
 tera = "1.20.0"
 toml = { version = "0.8.19", features = ["preserve_order"] }
 
-[dev-dependencies]
-
 [features]
 clap = ["dep:clap"]
 
 [[bin]]
-name = "cli"
+name = "genify"
 path = "src/main.rs"
 required-features = ["clap"]

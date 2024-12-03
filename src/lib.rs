@@ -1,3 +1,5 @@
+mod tera_filters;
+
 use std::{
     fs,
     io::{self, Read, Seek, Write},
@@ -84,6 +86,7 @@ pub fn render_config_props_with_func(
     mut func: impl FnMut(&String, &mut toml::Value),
 ) -> Result<&mut Config, Error> {
     let mut tera = Tera::default();
+    tera_filters::register_all(&mut tera);
 
     let mut context = Context::new();
 
@@ -100,6 +103,7 @@ pub fn render_config_props_with_func(
 
 pub fn render_config_rules(config: &mut Config) -> Result<&mut Config, Error> {
     let mut tera = Tera::default();
+    tera_filters::register_all(&mut tera);
 
     let context = Context::from_serialize(&config.props).map_err(Error::Tera)?;
 
@@ -293,7 +297,7 @@ mod tests {
                 [[rules]]
                 type = "file"
                 path = "{{ dir }}/some.txt"
-                content = "{{ val }} {{ value }} {{ other }} {{ override }} - should be replaced"
+                content = "{{ val }} {{ value | pascal_case }} {{ other }} {{ override }} - should be replaced"
 
                 [[rules]]
                 type = "replace"
@@ -321,7 +325,7 @@ mod tests {
 
         let result = fs::read_to_string("tmp/some.txt").expect("File should be read");
         assert_eq!(
-            "prepend value\nval value val 2 - replaced value\nappend value\n",
+            "prepend value\nval Value val 2 - replaced value\nappend value\n",
             result
         );
     }

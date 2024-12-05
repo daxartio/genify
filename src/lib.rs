@@ -58,9 +58,9 @@ pub fn generate(
     config: &Config,
     overrides: Option<toml::map::Map<String, toml::Value>>,
 ) -> Result<(), Error> {
-    let mut config = config.clone();
+    let config = config.clone();
 
-    render_config_props(&mut config)
+    render_config_props(config)
         .and_then(|c| apply_overrides(c, overrides))
         .and_then(render_config_rules)
         .and_then(|c| extend_paths(c, root))
@@ -68,23 +68,23 @@ pub fn generate(
 }
 
 fn apply_overrides(
-    config: &mut Config,
+    mut config: Config,
     overrides: Option<toml::map::Map<String, toml::Value>>,
-) -> Result<&mut Config, Error> {
+) -> Result<Config, Error> {
     if let Some(overrides) = overrides {
         config.props.extend(overrides);
     }
     Ok(config)
 }
 
-pub fn render_config_props(config: &mut Config) -> Result<&mut Config, Error> {
+pub fn render_config_props(config: Config) -> Result<Config, Error> {
     render_config_props_with_func(config, |_, _| {})
 }
 
 pub fn render_config_props_with_func(
-    config: &mut Config,
+    mut config: Config,
     mut func: impl FnMut(&String, &mut toml::Value),
-) -> Result<&mut Config, Error> {
+) -> Result<Config, Error> {
     let mut tera = Tera::default();
     tera_filters::register_all(&mut tera);
 
@@ -101,7 +101,7 @@ pub fn render_config_props_with_func(
     Ok(config)
 }
 
-pub fn render_config_rules(config: &mut Config) -> Result<&mut Config, Error> {
+pub fn render_config_rules(mut config: Config) -> Result<Config, Error> {
     let mut tera = Tera::default();
     tera_filters::register_all(&mut tera);
 
@@ -139,7 +139,7 @@ pub fn render_config_rules(config: &mut Config) -> Result<&mut Config, Error> {
     Ok(config)
 }
 
-pub fn extend_paths<'a>(config: &'a mut Config, root: &Path) -> Result<&'a mut Config, Error> {
+pub fn extend_paths(mut config: Config, root: &Path) -> Result<Config, Error> {
     for rule in config.rules.iter_mut() {
         match rule {
             Rule::File { path, content: _ } => {
@@ -164,7 +164,7 @@ pub fn extend_paths<'a>(config: &'a mut Config, root: &Path) -> Result<&'a mut C
     Ok(config)
 }
 
-pub fn generate_files(config: &mut Config) -> Result<(), Error> {
+pub fn generate_files(config: Config) -> Result<(), Error> {
     for rule in config.rules.iter() {
         match rule {
             Rule::File { path, content } => {

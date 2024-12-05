@@ -26,7 +26,7 @@ fn main() {
     let cli = Cli::parse();
     let mut err = clap::Error::new(ErrorKind::ValueValidation).with_cmd(&Cli::command());
 
-    let mut config = match &cli.path {
+    let config = match &cli.path {
         ConfigPath::File(path) => {
             let path = Path::new(path);
             if !path.is_file() {
@@ -42,7 +42,7 @@ fn main() {
             config
         }
     };
-    let Ok(_) = genify::render_config_props_with_func(&mut config, |k, v| {
+    let Ok(_) = genify::render_config_props_with_func(config, |k, v| {
         if cli.no_interaction {
             return;
         }

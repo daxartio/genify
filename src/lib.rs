@@ -1,63 +1,20 @@
+mod error;
+mod schema;
 mod tera_filters;
+mod toml;
 
 use std::{
     fs,
     io::{self, Read, Seek, Write},
     path::Path,
 };
-
-use regex::Regex;
-use serde::Deserialize;
 use tera::{Context, Tera};
 
-#[derive(Clone, Deserialize, Debug)]
-pub struct Config {
-    #[serde(default)]
-    pub props: toml::map::Map<String, toml::Value>,
-    #[serde(default)]
-    pub rules: Vec<Rule>,
-}
+pub use crate::error::*;
+pub use crate::schema::*;
+pub use crate::toml::parse_toml;
 
-impl Config {
-    pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(s)
-    }
-}
-
-#[derive(Clone, Deserialize, Debug)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Rule {
-    File {
-        path: String,
-        content: String,
-    },
-    Append {
-        path: String,
-        content: String,
-    },
-    Prepend {
-        path: String,
-        content: String,
-    },
-    Replace {
-        path: String,
-        #[serde(with = "serde_regex")]
-        replace: Regex,
-        content: String,
-    },
-}
-
-#[derive(Debug)]
-pub enum Error {
-    Tera(tera::Error),
-    IOError(io::Error),
-}
-
-pub fn generate(
-    root: &Path,
-    config: &Config,
-    overrides: Option<toml::map::Map<String, toml::Value>>,
-) -> Result<(), Error> {
+pub fn generate(root: &Path, config: &Config, overrides: Option<Map>) -> Result<(), Error> {
     let config = config.clone();
 
     render_config_props(config)
@@ -67,10 +24,7 @@ pub fn generate(
         .and_then(generate_files)
 }
 
-fn apply_overrides(
-    mut config: Config,
-    overrides: Option<toml::map::Map<String, toml::Value>>,
-) -> Result<Config, Error> {
+fn apply_overrides(mut config: Config, overrides: Option<Map>) -> Result<Config, Error> {
     if let Some(overrides) = overrides {
         config.props.extend(overrides);
     }
@@ -83,7 +37,7 @@ pub fn render_config_props(config: Config) -> Result<Config, Error> {
 
 pub fn render_config_props_with_func(
     mut config: Config,
-    mut func: impl FnMut(&String, &mut toml::Value),
+    mut func: impl FnMut(&String, &mut Value),
 ) -> Result<Config, Error> {
     let mut tera = Tera::default();
     tera_filters::register_all(&mut tera);
@@ -91,11 +45,11 @@ pub fn render_config_props_with_func(
     let mut context = Context::new();
 
     for (key, val) in config.props.iter_mut() {
-        if let toml::Value::String(s) = val {
+        if let Value::String(s) = val {
             *s = tera.render_str(s, &context).map_err(Error::Tera)?;
         }
         func(key, val);
-        context.insert(key, val);
+        context.insert(key.as_str(), val);
     }
 
     Ok(config)
@@ -105,7 +59,11 @@ pub fn render_config_rules(mut config: Config) -> Result<Config, Error> {
     let mut tera = Tera::default();
     tera_filters::register_all(&mut tera);
 
-    let context = Context::from_serialize(&config.props).map_err(Error::Tera)?;
+    let mut context = Context::new();
+
+    for (key, val) in config.props.iter_mut() {
+        context.insert(key.as_str(), val);
+    }
 
     for rule in config.rules.iter_mut() {
         match rule {
@@ -256,13 +214,13 @@ mod tests {
 
     #[test]
     fn test_parse_empty() {
-        let config = Config::from_toml("");
+        let config = parse_toml("");
         assert!(config.is_ok());
     }
 
     #[test]
     fn test_parse() {
-        let config = Config::from_toml(
+        let config = parse_toml(
             r#"
                 [props]
                 project_name = "project"
@@ -285,7 +243,7 @@ mod tests {
             }
         }
 
-        let config: Config = toml::from_str(
+        let config: Config = parse_toml(
             r#"
                 [props]
                 value = "value"
@@ -318,10 +276,12 @@ mod tests {
         )
         .expect("Config should be parsed");
 
-        let mut overrides = toml::map::Map::new();
-        overrides.insert("override".to_string(), toml::Value::Integer(2));
-
-        generate(Path::new("."), &config, Some(overrides)).expect("File should be generated");
+        generate(
+            Path::new("."),
+            &config,
+            Some(vec![("override".to_string(), Value::Integer(2))]),
+        )
+        .expect("File should be generated");
 
         let result = fs::read_to_string("tmp/some.txt").expect("File should be read");
         assert_eq!(

@@ -33,8 +33,7 @@ fn main() {
                 err.insert(ContextKind::InvalidValue, ContextValue::None);
                 err.exit();
             }
-            let Ok(Ok(config)) =
-                fs::read_to_string(path).map(|raw| genify::Config::from_toml(&raw))
+            let Ok(Ok(config)) = fs::read_to_string(path).map(|raw| genify::parse_toml(&raw))
             else {
                 err.insert(ContextKind::InvalidValue, ContextValue::None);
                 err.exit();
@@ -46,13 +45,13 @@ fn main() {
         if cli.no_interaction {
             return;
         }
-        if let toml::Value::String(default) = v {
+        if let genify::Value::String(default) = v {
             print!("{} ({}): ", k, default);
             io::stdout().flush().unwrap();
             let mut input_string = String::new();
             io::stdin().read_line(&mut input_string).unwrap();
             if !input_string.trim().is_empty() {
-                *v = toml::Value::String(input_string.trim().to_string());
+                *v = genify::Value::String(input_string.trim().to_string());
             }
         }
     })

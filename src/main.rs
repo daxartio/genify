@@ -4,10 +4,7 @@ use std::{
     path::Path,
 };
 
-use clap::{
-    error::{ContextKind, ContextValue, ErrorKind},
-    CommandFactory, Parser,
-};
+use clap::{error::ErrorKind, CommandFactory, Parser};
 use genify::generate_files;
 
 static BIN_NAME: &str = env!("CARGO_PKG_NAME");
@@ -16,6 +13,7 @@ static BIN_DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
 #[derive(Parser)]
 #[command(version, name=BIN_NAME, about=BIN_DESCRIPTION)]
 struct Cli {
+    /// Path to a config file.
     path: ConfigPath,
     /// Do not ask any interactive question.
     #[arg(short, long)]
@@ -24,42 +22,98 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    let mut err = clap::Error::new(ErrorKind::ValueValidation).with_cmd(&Cli::command());
+    let cmd = &Cli::command();
 
     let config = match &cli.path {
         ConfigPath::File(path) => {
             let path = Path::new(path);
             if !path.is_file() {
-                err.insert(ContextKind::InvalidValue, ContextValue::None);
-                err.exit();
+                clap::Error::raw(ErrorKind::ValueValidation, "Path is not a file")
+                    .with_cmd(cmd)
+                    .exit();
             }
-            let Ok(Ok(config)) = fs::read_to_string(path).map(|raw| genify::parse_toml(&raw))
-            else {
-                err.insert(ContextKind::InvalidValue, ContextValue::None);
-                err.exit();
+            let raw = match fs::read_to_string(path) {
+                Ok(content) => content,
+                Err(_) => {
+                    clap::Error::raw(ErrorKind::ValueValidation, "Failed to read file")
+                        .with_cmd(cmd)
+                        .exit();
+                }
+            };
+
+            let config = match genify::parse_toml(&raw) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    clap::Error::raw(
+                        ErrorKind::ValueValidation,
+                        format!("Failed to parse TOML: {err:?}"),
+                    )
+                    .with_cmd(cmd)
+                    .exit();
+                }
             };
             config
         }
     };
-    let Ok(_) = genify::render_config_props_with_func(config, |k, v| {
+    if let Err(error) = genify::render_config_props_with_func(config, |k, v| {
         if cli.no_interaction {
             return;
         }
-        if let genify::Value::String(default) = v {
+        let prompt = |default: &str| -> Option<String> {
             print!("{} ({}): ", k, default);
-            io::stdout().flush().unwrap();
-            let mut input_string = String::new();
-            io::stdin().read_line(&mut input_string).unwrap();
-            if !input_string.trim().is_empty() {
-                *v = genify::Value::String(input_string.trim().to_string());
+            if io::stdout().flush().is_err() {
+                return None;
             }
+            let mut input = String::new();
+            if io::stdin().read_line(&mut input).is_ok() {
+                let trimmed = input.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+            }
+            None
+        };
+
+        match v {
+            genify::Value::String(s) => {
+                if let Some(new) = prompt(s) {
+                    *v = genify::Value::String(new);
+                }
+            }
+            genify::Value::Integer(i) => {
+                if let Some(new) = prompt(&i.to_string()) {
+                    if let Ok(parsed) = new.parse::<i64>() {
+                        *v = genify::Value::Integer(parsed);
+                    }
+                }
+            }
+            genify::Value::Float(f) => {
+                if let Some(new) = prompt(&f.to_string()) {
+                    if let Ok(parsed) = new.parse::<f64>() {
+                        *v = genify::Value::Float(parsed);
+                    }
+                }
+            }
+            genify::Value::Boolean(b) => {
+                if let Some(new) = prompt(&b.to_string()) {
+                    if let Ok(parsed) = new.parse::<bool>() {
+                        *v = genify::Value::Boolean(parsed);
+                    }
+                }
+            }
+            genify::Value::Array(_) | genify::Value::Map(_) => {}
         }
     })
     .and_then(genify::render_config_rules)
     .and_then(|c| genify::extend_paths(c, Path::new(".")))
-    .and_then(generate_files) else {
-        err.insert(ContextKind::InvalidValue, ContextValue::None);
-        err.exit();
+    .and_then(generate_files)
+    {
+        clap::Error::raw(
+            ErrorKind::InvalidValue,
+            format!("Failed to process config: {error:?}"),
+        )
+        .with_cmd(cmd)
+        .exit();
     };
 }
 

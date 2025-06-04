@@ -25,35 +25,7 @@ fn main() {
     let cmd = &Cli::command();
 
     let config = match &cli.path {
-        ConfigPath::File(path) => {
-            let path = Path::new(path);
-            if !path.is_file() {
-                clap::Error::raw(ErrorKind::ValueValidation, "Path is not a file")
-                    .with_cmd(cmd)
-                    .exit();
-            }
-            let raw = match fs::read_to_string(path) {
-                Ok(content) => content,
-                Err(_) => {
-                    clap::Error::raw(ErrorKind::ValueValidation, "Failed to read file")
-                        .with_cmd(cmd)
-                        .exit();
-                }
-            };
-
-            let config = match genify::parse_toml(&raw) {
-                Ok(cfg) => cfg,
-                Err(err) => {
-                    clap::Error::raw(
-                        ErrorKind::ValueValidation,
-                        format!("Failed to parse TOML: {err:?}"),
-                    )
-                    .with_cmd(cmd)
-                    .exit();
-                }
-            };
-            config
-        }
+        ConfigPath::File(path) => parse_file(cmd, path).unwrap_or_else(|err| err.exit()),
     };
     if let Err(error) = genify::render_config_props_with_func(config, |k, v| {
         if cli.no_interaction {
@@ -115,6 +87,35 @@ fn main() {
         .with_cmd(cmd)
         .exit();
     };
+}
+
+fn parse_file(cmd: &clap::Command, path: &String) -> Result<genify::Config, clap::Error> {
+    let path = Path::new(path);
+    if !path.is_file() {
+        return Err(
+            clap::Error::raw(ErrorKind::ValueValidation, "Path is not a file").with_cmd(cmd),
+        );
+    }
+    let raw = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(_) => {
+            return Err(
+                clap::Error::raw(ErrorKind::ValueValidation, "Failed to read file").with_cmd(cmd),
+            );
+        }
+    };
+
+    let config = match genify::parse_toml(&raw) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            return Err(clap::Error::raw(
+                ErrorKind::ValueValidation,
+                format!("Failed to parse TOML: {err:?}"),
+            )
+            .with_cmd(cmd));
+        }
+    };
+    Ok(config)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

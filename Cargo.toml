@@ -11,6 +11,9 @@ license = "MIT"
 
 [dependencies]
 clap = { version = "4.5.39", features = ["derive"], optional = true }
+reqwest = { version = "0.11", features = ["blocking", "rustls-tls"], optional = true }
+url = { version = "2", optional = true }
+
 convert_case = "0.8.0"
 regex = "1.11.1"
 serde = { version = "1.0.219", features = ["derive"] }
@@ -19,9 +22,9 @@ tera = "1.20.0"
 toml = { version = "0.8.22", features = ["preserve_order"] }
 
 [features]
-clap = ["dep:clap"]
+cli = ["dep:clap", "dep:reqwest", "dep:url"]
 
 [[bin]]
 name = "genify"
 path = "src/main.rs"
-required-features = ["clap"]
+required-features = ["cli"]

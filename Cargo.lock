@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "genify"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "clap",
  "convert_case",

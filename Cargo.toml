@@ -1,6 +1,6 @@
 [package]
 name = "genify"
-version = "0.0.2"
+version = "0.0.3"
 authors = ["Danil Akhtarov <daxartio@gmail.com>"]
 edition = "2021"
 description = "Turn one file into a complete project"

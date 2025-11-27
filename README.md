@@ -119,13 +119,13 @@ fn main() {
                 .unwrap()
                 .as_str(),
         )
-        .expect("Cannot parse the example.toml"),
+        .expect("The config should be valid"),
         Some(vec![(
             "value".to_string(),
             genify::Value::String("val".to_string()),
         )]),
     )
-    .expect("Cannot generate the example");
+    .expect("The generation should be successful");
 }
 ```
 

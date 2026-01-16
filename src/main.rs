@@ -4,9 +4,10 @@ use std::{
     path::Path,
 };
 
-use clap::{error::ErrorKind, CommandFactory, Parser};
+use clap::{CommandFactory, Parser, error::ErrorKind};
 use genify::generate_files;
 use reqwest::blocking::Client;
+use serde_json::Value as JsonValue;
 use url::Url;
 
 static BIN_NAME: &str = env!("CARGO_PKG_NAME");
@@ -20,6 +21,9 @@ struct Cli {
     /// Do not ask any interactive question.
     #[arg(short, long)]
     no_interaction: bool,
+    /// Override props using a JSON object (Array/Map supported).
+    #[arg(short = 'p', long = "props-json", value_name = "JSON")]
+    props_json: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -43,7 +47,12 @@ fn main() {
     let cli = Cli::parse();
     let cmd = &Cli::command();
 
-    let config = parse_file(&cli.path).unwrap_or_else(|err| err.with_cmd(cmd).exit());
+    let mut config = parse_file(&cli.path).unwrap_or_else(|err| err.with_cmd(cmd).exit());
+
+    if let Some(raw_props) = &cli.props_json {
+        let overrides = parse_props_json(raw_props).unwrap_or_else(|err| err.with_cmd(cmd).exit());
+        config.props.extend(overrides);
+    }
 
     if let Err(error) = genify::render_config_props_with_func(config, |k, v| {
         if cli.no_interaction {
@@ -91,7 +100,21 @@ fn main() {
                     }
                 }
             }
-            genify::Value::Array(_) | genify::Value::Map(_) => {}
+            genify::Value::Array(_) | genify::Value::Map(_) => {
+                let Some(default) = value_to_json_string(v) else {
+                    return;
+                };
+                if let Some(new) = prompt(&default) {
+                    match parse_json_value(&new) {
+                        Ok(genify::Value::Array(parsed)) => *v = genify::Value::Array(parsed),
+                        Ok(genify::Value::Map(parsed)) => *v = genify::Value::Map(parsed),
+                        Ok(_) => eprintln!(
+                            "Value for \"{k}\" must be a JSON array or object; keeping default."
+                        ),
+                        Err(err) => eprintln!("Failed to parse \"{k}\": {err}"),
+                    }
+                }
+            }
         }
     })
     .and_then(genify::render_config_rules)
@@ -143,4 +166,39 @@ fn parse_file(path: &ConfigPath) -> Result<genify::Config, clap::Error> {
         )
     })?;
     Ok(config)
+}
+
+fn parse_props_json(raw: &str) -> Result<genify::Map, clap::Error> {
+    let parsed: JsonValue = serde_json::from_str(raw).map_err(|err| {
+        clap::Error::raw(
+            ErrorKind::InvalidValue,
+            format!("Failed to parse props JSON: {err}"),
+        )
+    })?;
+    let object = parsed.as_object().ok_or_else(|| {
+        clap::Error::raw(ErrorKind::InvalidValue, "Props JSON must be a JSON object")
+    })?;
+
+    let mut props = Vec::with_capacity(object.len());
+    for (key, value) in object {
+        let converted = genify::Value::try_from(value.clone()).map_err(|err| {
+            clap::Error::raw(
+                ErrorKind::InvalidValue,
+                format!("Invalid value for \"{key}\": {err}"),
+            )
+        })?;
+        props.push((key.clone(), converted));
+    }
+
+    Ok(props)
+}
+
+fn parse_json_value(raw: &str) -> Result<genify::Value, String> {
+    let value: JsonValue =
+        serde_json::from_str(raw).map_err(|err| format!("invalid JSON: {err}"))?;
+    genify::Value::try_from(value)
+}
+
+fn value_to_json_string(value: &genify::Value) -> Option<String> {
+    serde_json::to_string(value).ok()
 }

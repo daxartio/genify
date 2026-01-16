@@ -1,6 +1,6 @@
 use convert_case::{Case, Casing};
 use std::{collections::HashMap, hash::BuildHasher};
-use tera::{to_value, try_get_value, Result, Tera, Value};
+use tera::{Result, Tera, Value, to_value, try_get_value};
 
 pub fn register_all(tera: &mut Tera) {
     tera.register_filter("pascal_case", pascal_case);

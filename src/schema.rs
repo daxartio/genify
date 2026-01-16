@@ -1,8 +1,9 @@
 use regex::Regex;
 use serde::{
-    ser::{SerializeMap, SerializeSeq},
     Deserialize, Serialize, Serializer,
+    ser::{SerializeMap, SerializeSeq},
 };
+use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
 #[derive(Clone, Serialize, Debug)]
 pub struct Config {
@@ -73,5 +74,89 @@ impl Serialize for Value {
                 map.end()
             }
         }
+    }
+}
+
+impl TryFrom<JsonValue> for Value {
+    type Error = String;
+
+    fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
+        match value {
+            JsonValue::String(v) => Ok(Value::String(v)),
+            JsonValue::Number(v) => json_number_to_value(v),
+            JsonValue::Bool(v) => Ok(Value::Boolean(v)),
+            JsonValue::Array(values) => {
+                let mut result = Vec::with_capacity(values.len());
+                for value in values {
+                    result.push(Value::try_from(value)?);
+                }
+                Ok(Value::Array(result))
+            }
+            JsonValue::Object(map) => map_from_json(map).map(Value::Map),
+            JsonValue::Null => Err("null is not supported".to_string()),
+        }
+    }
+}
+
+fn json_number_to_value(number: JsonNumber) -> Result<Value, String> {
+    if let Some(int) = number.as_i64() {
+        return Ok(Value::Integer(int));
+    }
+    number
+        .as_f64()
+        .map(Value::Float)
+        .ok_or_else(|| "number is out of range".to_string())
+}
+
+fn map_from_json(map: JsonMap<String, JsonValue>) -> Result<Map, String> {
+    map.into_iter()
+        .map(|(key, value)| Value::try_from(value).map(|value| (key, value)))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn converts_json_array() {
+        let value = Value::try_from(json!(["a", 1, true])).expect("array should be converted");
+        assert_eq!(
+            value,
+            Value::Array(vec![
+                Value::String("a".to_string()),
+                Value::Integer(1),
+                Value::Boolean(true)
+            ])
+        );
+    }
+
+    #[test]
+    fn converts_json_map() {
+        let value = Value::try_from(json!({
+            "items": [1, 2],
+            "nested": { "flag": false }
+        }))
+        .expect("map should be converted");
+        assert_eq!(
+            value,
+            Value::Map(vec![
+                (
+                    "items".to_string(),
+                    Value::Array(vec![Value::Integer(1), Value::Integer(2)])
+                ),
+                (
+                    "nested".to_string(),
+                    Value::Map(vec![("flag".to_string(), Value::Boolean(false))])
+                )
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_null_json_value() {
+        let error = Value::try_from(JsonValue::Null).expect_err("null is unsupported");
+        assert!(error.contains("null"));
     }
 }

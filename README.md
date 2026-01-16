@@ -45,9 +45,10 @@ Arguments:
   <PATH>  Path to a config file or http(s) URL
 
 Options:
-  -n, --no-interaction  Do not ask any interactive question
-  -h, --help            Print help
-  -V, --version         Print version
+  -p, --props-json <JSON>  Override props using a JSON object (Array/Map supported)
+  -n, --no-interaction     Do not ask any interactive question
+  -h, --help               Print help
+  -V, --version            Print version
 ```
 
 `example.toml`
@@ -86,6 +87,12 @@ content = "append {{ value }}"
 genify example.toml
 ```
 
+Override props from the CLI (including Array/Map) using JSON:
+
+```shell
+genify example.toml --props-json '{"tags": ["cli", "json"], "meta": {"license": "MIT"}}'
+```
+
 `tmp/some.txt`
 
 ```
@@ -102,10 +109,10 @@ append value
 | Integer  | Whole number             | ✅ Supported             |
 | Float    | Decimal number           | ✅ Supported             |
 | Boolean  | true or false            | ✅ Supported             |
-| Array    | List of values           | ❌ Not supported         |
-| Map      | Key-value pairs          | ❌ Not supported         |
+| Array    | List of values           | ✅ JSON input            |
+| Map      | Key-value pairs          | ✅ JSON input            |
 
-**Note:** In interactive CLI mode, all types are supported **except** `Array` and `Map`, will be used default values.
+**Note:** For `Array` and `Map`, enter JSON when prompted or provide them up front with `--props-json`.
 
 
 ### Code

@@ -12,3 +12,5 @@ target/
 book
 
 tmp
+
+!AGENTS.md

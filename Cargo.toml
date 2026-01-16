@@ -2,7 +2,7 @@
 name = "genify"
 version = "0.0.3"
 authors = ["Danil Akhtarov <daxartio@gmail.com>"]
-edition = "2021"
+edition = "2024"
 description = "Turn one file into a complete project"
 repository = "https://github.com/daxartio/genify"
 license = "MIT"

@@ -14,7 +14,7 @@ clap = { version = "4.5", features = ["derive"], optional = true }
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], optional = true }
 url = { version = "2", optional = true }
 
-convert_case = "0.10.0"
+convert_case = "0.11.0"
 regex = "1.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_regex = "1.1.0"

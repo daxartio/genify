@@ -1,4 +1,6 @@
 mod error;
+pub mod generation;
+pub mod mcp;
 mod schema;
 mod tera_filters;
 mod toml;

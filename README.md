@@ -13,6 +13,7 @@ There are two modes:
 
 - **CLI interactive mode** – for manual use and quick input.
 - **Code mode** – for automated and configurable project generation.
+- **MCP server mode** – for AI coding agents that call structured tools over STDIO.
 
 Features:
 
@@ -39,16 +40,21 @@ Features:
 ```
 Turn one file into a complete project
 
-Usage: genify [OPTIONS] <PATH>
+Usage: genify [OPTIONS] [PATH]
+       genify <COMMAND>
 
 Arguments:
-  <PATH>  Path to a config file or http(s) URL
+  [PATH]  Path to a config file or http(s) URL
 
 Options:
   -p, --props-json <JSON>  Override props using a JSON object (Array/Map supported)
   -n, --no-interaction     Do not ask any interactive question
   -h, --help               Print help
   -V, --version            Print version
+
+Commands:
+  mcp   Start genify as an MCP server over STDIO
+  help  Print this message or the help of the given subcommand(s)
 ```
 
 `example.toml`
@@ -101,16 +107,116 @@ val value Val 1 - replaced value
 append value
 ```
 
+### MCP
+
+Run genify as an MCP server using the standard STDIO transport:
+
+```shell
+genify mcp --root .
+```
+
+For read-only agent sessions:
+
+```shell
+genify mcp --root . --read-only
+```
+
+Example Codex configuration:
+
+```toml
+[mcp_servers.genify]
+command = "genify"
+args = ["mcp", "--root", "."]
+```
+
+The MCP server writes protocol messages only to `stdout`; logs and diagnostics go to `stderr`.
+All filesystem access is constrained to `--root`.
+
+Available tools:
+
+| Tool                     | Behavior                                                                                 |
+|--------------------------|------------------------------------------------------------------------------------------|
+| `genify_plan`            | Returns planned file operations and affected paths without writing files.                |
+| `genify_diff`            | Runs generation in dry-run mode and returns a unified diff.                              |
+| `genify_apply`           | Applies changes only when `explicit_approval` is `true` or `confirm_token` is `"apply"`. |
+| `genify_validate_config` | Validates config parsing, rendering, and generated paths.                                |
+| `genify_list_templates`  | Lists `.toml` configs and template files under the MCP root.                             |
+
+`genify_plan`, `genify_diff`, and `genify_apply` accept the config directly as JSON in MCP tool arguments.
+No temporary TOML config or template file is required.
+
+```json
+{
+  "config": {
+    "rules": [
+      {
+        "type": "replace",
+        "path": "src/application.rs",
+        "replace": "old text",
+        "content": "new text"
+      }
+    ]
+  },
+  "root": "."
+}
+```
+
+Supported rule examples:
+
+```json
+{
+  "config": {
+    "rules": [
+      {
+        "type": "append",
+        "path": "README.md",
+        "content": "..."
+      }
+    ]
+  }
+}
+```
+
+```json
+{
+  "config": {
+    "rules": [
+      {
+        "type": "prepend",
+        "path": "README.md",
+        "content": "..."
+      }
+    ]
+  }
+}
+```
+
+```json
+{
+  "config": {
+    "rules": [
+      {
+        "type": "file",
+        "path": "new/file.rs",
+        "content": "..."
+      }
+    ]
+  }
+}
+```
+
+`genify_validate_config` returns a structured `hint.minimal_config` and per-operation examples when the config is missing or invalid.
+
 ### Supported Variable Types
 
-| Type     | Description              | CLI Interactive Support  |
-|----------|--------------------------|--------------------------|
-| String   | Text value               | ✅ Supported             |
-| Integer  | Whole number             | ✅ Supported             |
-| Float    | Decimal number           | ✅ Supported             |
-| Boolean  | true or false            | ✅ Supported             |
-| Array    | List of values           | ✅ JSON input            |
-| Map      | Key-value pairs          | ✅ JSON input            |
+| Type    | Description     | CLI Interactive Support |
+|---------|-----------------|-------------------------|
+| String  | Text value      | ✅ Supported             |
+| Integer | Whole number    | ✅ Supported             |
+| Float   | Decimal number  | ✅ Supported             |
+| Boolean | true or false   | ✅ Supported             |
+| Array   | List of values  | ✅ JSON input            |
+| Map     | Key-value pairs | ✅ JSON input            |
 
 **Note:** For `Array` and `Map`, enter JSON when prompted or provide them up front with `--props-json`.
 

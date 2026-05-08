@@ -1,10 +1,10 @@
 use std::{
     fs,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
-use clap::{CommandFactory, Parser, error::ErrorKind};
+use clap::{Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
 use genify::generate_files;
 use reqwest::blocking::Client;
 use serde_json::Value as JsonValue;
@@ -14,16 +14,34 @@ static BIN_NAME: &str = env!("CARGO_PKG_NAME");
 static BIN_DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
 
 #[derive(Parser)]
-#[command(version, name=BIN_NAME, about=BIN_DESCRIPTION)]
+#[command(version, name=BIN_NAME, about=BIN_DESCRIPTION, args_conflicts_with_subcommands = true)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
     /// Path to a config file or http(s) URL.
-    path: ConfigPath,
+    path: Option<ConfigPath>,
     /// Do not ask any interactive question.
     #[arg(short, long)]
     no_interaction: bool,
     /// Override props using a JSON object (Array/Map supported).
     #[arg(short = 'p', long = "props-json", value_name = "JSON")]
     props_json: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Start genify as an MCP server over STDIO.
+    Mcp(McpArgs),
+}
+
+#[derive(Args)]
+struct McpArgs {
+    /// Filesystem root the MCP server is allowed to access.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// Disable tools that write to disk.
+    #[arg(long)]
+    read_only: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -45,17 +63,44 @@ impl From<&str> for ConfigPath {
 
 fn main() {
     let cli = Cli::parse();
-    let cmd = &Cli::command();
+    let cmd = Cli::command();
+    let Cli {
+        command,
+        path,
+        no_interaction,
+        props_json,
+    } = cli;
 
-    let mut config = parse_file(&cli.path).unwrap_or_else(|err| err.with_cmd(cmd).exit());
+    if let Some(command) = command {
+        match command {
+            Commands::Mcp(args) => {
+                if let Err(error) = genify::mcp::serve_stdio(&args.root, args.read_only) {
+                    eprintln!("Failed to run MCP server: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        return;
+    }
 
-    if let Some(raw_props) = &cli.props_json {
-        let overrides = parse_props_json(raw_props).unwrap_or_else(|err| err.with_cmd(cmd).exit());
+    let Some(path) = path else {
+        clap::Error::raw(
+            ErrorKind::MissingRequiredArgument,
+            "the following required argument was not provided: <PATH>",
+        )
+        .with_cmd(&cmd)
+        .exit();
+    };
+
+    let mut config = parse_file(&path).unwrap_or_else(|err| err.with_cmd(&cmd).exit());
+
+    if let Some(raw_props) = &props_json {
+        let overrides = parse_props_json(raw_props).unwrap_or_else(|err| err.with_cmd(&cmd).exit());
         config.props.extend(overrides);
     }
 
     if let Err(error) = genify::render_config_props_with_func(config, |k, v| {
-        if cli.no_interaction {
+        if no_interaction {
             return;
         }
         let prompt = |default: &str| -> Option<String> {
@@ -125,7 +170,7 @@ fn main() {
             ErrorKind::InvalidValue,
             format!("Failed to process config: {error:?}"),
         )
-        .with_cmd(cmd)
+        .with_cmd(&cmd)
         .exit();
     };
 }

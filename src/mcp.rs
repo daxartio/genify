@@ -1,8 +1,15 @@
-use std::{
-    io::{self, BufRead, Write},
-    path::Path,
-};
+use std::{path::Path, sync::Arc};
 
+use rmcp::{
+    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
+    model::{
+        CallToolRequestParams, CallToolResult, Content, Implementation, JsonObject,
+        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+        ToolAnnotations,
+    },
+    service::{RequestContext, ServerInitializeError},
+    transport::stdio,
+};
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use thiserror::Error;
@@ -11,231 +18,86 @@ use crate::generation::{
     ApplyRequest, CoreError, GenerationCore, GenerationRequest, ValidateConfigRequest,
 };
 
-const PROTOCOL_VERSION: &str = "2025-11-25";
-const SUPPORTED_PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-
 #[derive(Debug, Error)]
 pub enum ServerError {
     #[error(transparent)]
     Core(#[from] CoreError),
-    #[error("MCP I/O failed: {0}")]
-    Io(#[from] io::Error),
-    #[error("MCP JSON serialization failed: {0}")]
-    Json(#[from] serde_json::Error),
+    #[error("failed to initialize MCP server: {0}")]
+    Initialize(#[from] Box<ServerInitializeError>),
+    #[error("MCP server task failed: {0}")]
+    Join(#[from] tokio::task::JoinError),
+    #[error("failed to create async runtime: {0}")]
+    Runtime(#[from] std::io::Error),
 }
 
 pub fn serve_stdio(root: impl AsRef<Path>, read_only: bool) -> Result<(), ServerError> {
     let core = GenerationCore::with_read_only(root, read_only)?;
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    serve(stdin.lock(), stdout.lock(), core)
-}
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()?;
 
-pub fn serve<R, W>(reader: R, writer: W, core: GenerationCore) -> Result<(), ServerError>
-where
-    R: BufRead,
-    W: Write,
-{
-    McpServer::new(core).serve(reader, writer)
+    runtime.block_on(async move {
+        let service = GenifyMcpServer::new(core)
+            .serve(stdio())
+            .await
+            .map_err(Box::new)?;
+        service.waiting().await?;
+        Ok(())
+    })
 }
 
 #[derive(Debug, Clone)]
-struct McpServer {
+struct GenifyMcpServer {
     core: GenerationCore,
 }
 
-impl McpServer {
+impl GenifyMcpServer {
     fn new(core: GenerationCore) -> Self {
         Self { core }
     }
 
-    fn serve<R, W>(&self, reader: R, mut writer: W) -> Result<(), ServerError>
-    where
-        R: BufRead,
-        W: Write,
-    {
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
+    fn call_genify_tool(&self, request: CallToolRequestParams) -> Result<CallToolResult, McpError> {
+        let arguments = request
+            .arguments
+            .map(JsonValue::Object)
+            .unwrap_or_else(|| JsonValue::Object(Default::default()));
 
-            let response = match serde_json::from_str::<JsonValue>(&line) {
-                Ok(message) => self.handle_message(message),
-                Err(err) => Some(error_response(
-                    JsonValue::Null,
-                    -32700,
-                    "Parse error",
-                    Some(json!({ "message": err.to_string() })),
-                )),
-            };
-
-            if let Some(response) = response {
-                serde_json::to_writer(&mut writer, &response)?;
-                writer.write_all(b"\n")?;
-                writer.flush()?;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn handle_message(&self, message: JsonValue) -> Option<JsonValue> {
-        match message {
-            JsonValue::Array(messages) => {
-                if messages.is_empty() {
-                    return Some(error_response(
-                        JsonValue::Null,
-                        -32600,
-                        "Invalid Request",
-                        Some(json!({ "message": "empty JSON-RPC batch" })),
-                    ));
-                }
-                let responses = messages
-                    .into_iter()
-                    .filter_map(|message| self.handle_single_message(message))
-                    .collect::<Vec<_>>();
-                if responses.is_empty() {
-                    None
-                } else {
-                    Some(JsonValue::Array(responses))
-                }
-            }
-            message => self.handle_single_message(message),
-        }
-    }
-
-    fn handle_single_message(&self, message: JsonValue) -> Option<JsonValue> {
-        let JsonValue::Object(object) = message else {
-            return Some(error_response(
-                JsonValue::Null,
-                -32600,
-                "Invalid Request",
-                Some(json!({ "message": "message must be a JSON object" })),
-            ));
-        };
-
-        if object.contains_key("result") || object.contains_key("error") {
-            return None;
-        }
-
-        let is_notification = !object.contains_key("id");
-        let id = object.get("id").cloned().unwrap_or(JsonValue::Null);
-        let Some(method) = object.get("method").and_then(JsonValue::as_str) else {
-            if is_notification {
-                return None;
-            }
-            return Some(error_response(
-                id,
-                -32600,
-                "Invalid Request",
-                Some(json!({ "message": "request method must be a string" })),
-            ));
-        };
-        let params = object.get("params").cloned().unwrap_or(JsonValue::Null);
-
-        if is_notification {
-            self.handle_notification(method);
-            return None;
-        }
-
-        Some(match method {
-            "initialize" => success_response(id, self.initialize(params)),
-            "ping" => success_response(id, json!({})),
-            "tools/list" => success_response(id, json!({ "tools": tools() })),
-            "tools/call" => match self.call_tool(params) {
-                Ok(result) => success_response(id, result),
-                Err(err) => error_response(
-                    id,
-                    -32602,
-                    "Invalid params",
-                    Some(json!({ "message": err })),
-                ),
-            },
-            "resources/list" => success_response(id, json!({ "resources": [] })),
-            "prompts/list" => success_response(id, json!({ "prompts": [] })),
-            _ => error_response(
-                id,
-                -32601,
-                "Method not found",
-                Some(json!({ "method": method })),
-            ),
-        })
-    }
-
-    fn handle_notification(&self, method: &str) {
-        if method != "notifications/initialized" {
-            eprintln!("genify mcp: ignored notification {method}");
-        }
-    }
-
-    fn initialize(&self, params: JsonValue) -> JsonValue {
-        let requested = params
-            .get("protocolVersion")
-            .and_then(JsonValue::as_str)
-            .unwrap_or(PROTOCOL_VERSION);
-        let protocol_version = if SUPPORTED_PROTOCOLS.contains(&requested) {
-            requested
-        } else {
-            PROTOCOL_VERSION
-        };
-
-        json!({
-            "protocolVersion": protocol_version,
-            "capabilities": {
-                "tools": {
-                    "listChanged": false
-                }
-            },
-            "serverInfo": {
-                "name": "genify",
-                "title": "genify",
-                "version": env!("CARGO_PKG_VERSION")
-            }
-        })
-    }
-
-    fn call_tool(&self, params: JsonValue) -> Result<JsonValue, String> {
-        let params: ToolCallParams = serde_json::from_value(params)
-            .map_err(|err| format!("tools/call params are invalid: {err}"))?;
-        let arguments = match params.arguments {
-            JsonValue::Null => JsonValue::Object(Default::default()),
-            value => value,
-        };
-
-        match params.name.as_str() {
-            "genify_plan" => self.tool_call(arguments, false, |core, args| {
+        match request.name.as_ref() {
+            "genify_plan" => Ok(self.tool_call(arguments, false, |core, args| {
                 let input: GenerationRequest = parse_arguments(args)?;
                 let output = core.plan(input).map_err(core_error_payload)?;
                 serde_json::to_value(output).map_err(serialization_error)
-            }),
-            "genify_diff" => self.tool_call(arguments, false, |core, args| {
+            })),
+            "genify_diff" => Ok(self.tool_call(arguments, false, |core, args| {
                 let input: GenerationRequest = parse_arguments(args)?;
                 let output = core.diff(input).map_err(core_error_payload)?;
                 let is_error = !output.errors.is_empty();
                 let value = serde_json::to_value(output).map_err(serialization_error)?;
                 Ok((value, is_error))
-            }),
-            "genify_apply" => self.tool_call(arguments, false, |core, args| {
+            })),
+            "genify_apply" => Ok(self.tool_call(arguments, false, |core, args| {
                 let input: ApplyRequest = parse_arguments(args)?;
                 let output = core.apply(input).map_err(core_error_payload)?;
                 let is_error = !output.errors.is_empty();
                 let value = serde_json::to_value(output).map_err(serialization_error)?;
                 Ok((value, is_error))
-            }),
-            "genify_validate_config" => self.tool_call(arguments, false, |core, args| {
+            })),
+            "genify_validate_config" => Ok(self.tool_call(arguments, false, |core, args| {
                 let input: ValidateConfigRequest = parse_arguments(args)?;
                 let output = core.validate_config(input).map_err(core_error_payload)?;
                 let is_error = !output.valid;
                 let value = serde_json::to_value(output).map_err(serialization_error)?;
                 Ok((value, is_error))
-            }),
-            "genify_list_templates" => self.tool_call(arguments, false, |core, args| {
+            })),
+            "genify_list_templates" => Ok(self.tool_call(arguments, false, |core, args| {
                 parse_empty_arguments(args)?;
                 let output = core.list_templates().map_err(core_error_payload)?;
                 serde_json::to_value(output).map_err(serialization_error)
-            }),
-            _ => Err(format!("Unknown tool: {}", params.name)),
+            })),
+            name => Err(McpError::invalid_params(
+                format!("Unknown tool: {name}"),
+                None,
+            )),
         }
     }
 
@@ -244,27 +106,50 @@ impl McpServer {
         arguments: JsonValue,
         default_is_error: bool,
         f: impl FnOnce(&GenerationCore, JsonValue) -> Result<T, JsonValue>,
-    ) -> Result<JsonValue, String>
+    ) -> CallToolResult
     where
         T: Into<JsonValueOrErrorFlag>,
     {
         match f(&self.core, arguments) {
             Ok(value) => match value.into() {
-                JsonValueOrErrorFlag::Value(value) => Ok(tool_result(value, default_is_error)),
+                JsonValueOrErrorFlag::Value(value) => tool_result(value, default_is_error),
                 JsonValueOrErrorFlag::ValueWithErrorFlag { value, is_error } => {
-                    Ok(tool_result(value, is_error))
+                    tool_result(value, is_error)
                 }
             },
-            Err(error_payload) => Ok(tool_result(error_payload, true)),
+            Err(error_payload) => tool_result(error_payload, true),
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct ToolCallParams {
-    name: String,
-    #[serde(default)]
-    arguments: JsonValue,
+impl ServerHandler for GenifyMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        let mut server_info = Implementation::new("genify", env!("CARGO_PKG_VERSION"));
+        server_info.title = Some("genify".to_string());
+
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(server_info)
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.call_genify_tool(request)
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult::with_all_items(tools()))
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        tools().into_iter().find(|tool| tool.name == name)
+    }
 }
 
 enum JsonValueOrErrorFlag {
@@ -348,107 +233,96 @@ fn core_error_kind(err: &CoreError) -> &'static str {
     }
 }
 
-fn tool_result(structured_content: JsonValue, is_error: bool) -> JsonValue {
+fn tool_result(structured_content: JsonValue, is_error: bool) -> CallToolResult {
     let text = serde_json::to_string_pretty(&structured_content)
         .unwrap_or_else(|_| "{\"error\":\"failed to serialize tool result\"}".to_string());
-    json!({
-        "content": [
-            {
-                "type": "text",
-                "text": text
-            }
-        ],
-        "structuredContent": structured_content,
-        "isError": is_error
-    })
+
+    let mut result = if is_error {
+        CallToolResult::error(vec![Content::text(text)])
+    } else {
+        CallToolResult::success(vec![Content::text(text)])
+    };
+    result.structured_content = Some(structured_content);
+    result
 }
 
-fn success_response(id: JsonValue, result: JsonValue) -> JsonValue {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result
-    })
-}
-
-fn error_response(
-    id: JsonValue,
-    code: i64,
-    message: &'static str,
-    data: Option<JsonValue>,
-) -> JsonValue {
-    let mut error = json!({
-        "code": code,
-        "message": message
-    });
-    if let Some(data) = data {
-        error["data"] = data;
-    }
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": error
-    })
-}
-
-fn tools() -> Vec<JsonValue> {
+fn tools() -> Vec<Tool> {
     vec![
-        json!({
-            "name": "genify_plan",
-            "title": "Plan genify changes",
-            "description": tool_description("Return the file operations genify would perform without modifying disk."),
-            "inputSchema": generation_input_schema(),
-            "outputSchema": plan_output_schema(),
-            "annotations": {
-                "readOnlyHint": true,
-                "destructiveHint": false
-            }
-        }),
-        json!({
-            "name": "genify_diff",
-            "title": "Diff genify changes",
-            "description": tool_description("Render the JSON genify config in dry-run mode and return a unified diff."),
-            "inputSchema": generation_input_schema(),
-            "outputSchema": diff_output_schema(),
-            "annotations": {
-                "readOnlyHint": true,
-                "destructiveHint": false
-            }
-        }),
-        json!({
-            "name": "genify_apply",
-            "title": "Apply genify changes",
-            "description": tool_description("Apply generated changes to disk. Requires explicit_approval=true or confirm_token=\"apply\"."),
-            "inputSchema": apply_input_schema(),
-            "outputSchema": apply_output_schema(),
-            "annotations": {
-                "readOnlyHint": false,
-                "destructiveHint": true
-            }
-        }),
-        json!({
-            "name": "genify_validate_config",
-            "title": "Validate genify config",
-            "description": tool_description("Validate a JSON genify config and rendered output paths without applying changes. Invalid input returns hint.minimal_config and operation examples."),
-            "inputSchema": validate_config_input_schema(),
-            "outputSchema": validate_config_output_schema(),
-            "annotations": {
-                "readOnlyHint": true,
-                "destructiveHint": false
-            }
-        }),
-        json!({
-            "name": "genify_list_templates",
-            "title": "List genify templates",
-            "description": "List genify config/template files discovered under the MCP root.",
-            "inputSchema": no_input_schema(),
-            "outputSchema": list_templates_output_schema(),
-            "annotations": {
-                "readOnlyHint": true,
-                "destructiveHint": false
-            }
-        }),
+        tool(
+            "genify_plan",
+            "Plan genify changes",
+            tool_description(
+                "Return the file operations genify would perform without modifying disk.",
+            ),
+            generation_input_schema(),
+            Some(plan_output_schema()),
+            ToolAnnotations::new().read_only(true).destructive(false),
+        ),
+        tool(
+            "genify_diff",
+            "Diff genify changes",
+            tool_description(
+                "Render the JSON genify config in dry-run mode and return a unified diff.",
+            ),
+            generation_input_schema(),
+            Some(diff_output_schema()),
+            ToolAnnotations::new().read_only(true).destructive(false),
+        ),
+        tool(
+            "genify_apply",
+            "Apply genify changes",
+            tool_description(
+                "Apply generated changes to disk. Requires explicit_approval=true or confirm_token=\"apply\".",
+            ),
+            apply_input_schema(),
+            Some(apply_output_schema()),
+            ToolAnnotations::new().read_only(false).destructive(true),
+        ),
+        tool(
+            "genify_validate_config",
+            "Validate genify config",
+            tool_description(
+                "Validate a JSON genify config and rendered output paths without applying changes. Invalid input returns hint.minimal_config and operation examples.",
+            ),
+            validate_config_input_schema(),
+            Some(validate_config_output_schema()),
+            ToolAnnotations::new().read_only(true).destructive(false),
+        ),
+        tool(
+            "genify_list_templates",
+            "List genify templates",
+            "List genify config/template files discovered under the MCP root.",
+            no_input_schema(),
+            Some(list_templates_output_schema()),
+            ToolAnnotations::new().read_only(true).destructive(false),
+        ),
     ]
+}
+
+fn tool(
+    name: &'static str,
+    title: &'static str,
+    description: impl Into<std::borrow::Cow<'static, str>>,
+    input_schema: JsonValue,
+    output_schema: Option<JsonValue>,
+    annotations: ToolAnnotations,
+) -> Tool {
+    let tool = Tool::new(name, description, Arc::new(schema_object(input_schema)))
+        .with_title(title)
+        .with_annotations(annotations);
+
+    if let Some(output_schema) = output_schema {
+        tool.with_raw_output_schema(Arc::new(schema_object(output_schema)))
+    } else {
+        tool
+    }
+}
+
+fn schema_object(schema: JsonValue) -> JsonObject {
+    match schema {
+        JsonValue::Object(object) => object,
+        _ => JsonObject::new(),
+    }
 }
 
 fn generation_input_schema() -> JsonValue {

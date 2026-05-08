@@ -1,5 +1,6 @@
 mod error;
 pub mod generation;
+#[cfg(feature = "mcp")]
 pub mod mcp;
 mod schema;
 mod tera_filters;

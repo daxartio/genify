@@ -470,7 +470,7 @@ fn config_schema() -> JsonValue {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "description": "Inline genify config as JSON. Minimum: {\"rules\":[{\"type\":\"replace\",\"path\":\"src/application.rs\",\"replace\":\"old text\",\"content\":\"new text\"}]}",
+                "description": "Inline genify config as JSON. Minimum: {\"rules\":[{\"type\":\"replace\",\"path\":\"src/application.rs\",\"replace\":\"old text\",\"content\":\"new text\"}]}",
         "properties": {
             "props": {
                 "type": "object",
@@ -478,27 +478,85 @@ fn config_schema() -> JsonValue {
             },
             "rules": {
                 "type": "array",
-                "description": "Generation rules. Supported types: replace, append, prepend, file.",
+                "description": "Generation rules. Supported types: write, delete, rename, move, copy, mkdir, chmod, append, append_once, prepend, insert_before, insert_after, replace, replace_or_append, managed_block.",
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
                         "type": {
                             "type": "string",
-                            "enum": ["replace", "append", "prepend", "file"]
+                            "enum": [
+                                "write",
+                                "delete",
+                                "rename",
+                                "move",
+                                "copy",
+                                "mkdir",
+                                "chmod",
+                                "append",
+                                "append_once",
+                                "prepend",
+                                "insert_before",
+                                "insert_after",
+                                "replace",
+                                "replace_or_append",
+                                "managed_block"
+                            ]
                         },
                         "path": {
                             "type": "string"
                         },
+                        "from": {
+                            "type": "string",
+                            "description": "Source path for rename, move, and copy."
+                        },
+                        "to": {
+                            "type": "string",
+                            "description": "Target path for rename, move, and copy."
+                        },
+                        "mode": {
+                            "type": "string",
+                            "description": "Unix chmod mode, for example \"755\" or \"644\"."
+                        },
+                        "if_exists": {
+                            "type": "string",
+                            "enum": [
+                                "overwrite",
+                                "error",
+                                "skip"
+                            ],
+                            "description": "Required for write. overwrite replaces an existing file, error fails when the target exists, skip leaves an existing file unchanged."
+                        },
+                        "marker": {
+                            "type": "string",
+                            "description": "Marker text for insert_before and insert_after."
+                        },
+                        "start_marker": {
+                            "type": "string",
+                            "description": "Start marker for managed_block."
+                        },
+                        "end_marker": {
+                            "type": "string",
+                            "description": "End marker for managed_block."
+                        },
                         "replace": {
                             "type": "string",
-                            "description": "Regex used only for replace rules."
+                            "description": "Regex used for replace and replace_or_append rules."
+                        },
+                        "replace_all": {
+                            "type": "boolean",
+                            "description": "When true, replace every regex match. Defaults to false. When false, replace fails unless the match count equals expected_matches, default 1."
+                        },
+                        "expected_matches": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Expected regex match count for replace and replace_or_append. Defaults to 1 when replace_all is false."
                         },
                         "content": {
                             "type": "string"
                         }
                     },
-                    "required": ["type", "path", "content"]
+                    "required": ["type"]
                 }
             }
         },
@@ -600,10 +658,12 @@ fn list_templates_output_schema() -> JsonValue {
 
 fn tool_description(summary: &str) -> String {
     format!(
-        "{summary}\n\nPass config directly as JSON in tool arguments; no config/template file is required.\n\nMinimal replace config:\n{}\n\nAppend example:\n{}\n\nPrepend example:\n{}\n\nFile example:\n{}",
+        "{summary}\n\nPass config directly as JSON in tool arguments; no config/template file is required.\n\nMinimal replace config:\n{}\n\nAppend once example:\n{}\n\nManaged block example:\n{}\n\nInsert after marker example:\n{}\n\nMove example:\n{}\n\nWrite example:\n{}",
         r#"{"config":{"rules":[{"type":"replace","path":"src/application.rs","replace":"old text","content":"new text"}]}}"#,
-        r#"{"config":{"rules":[{"type":"append","path":"README.md","content":"..."}]}}"#,
-        r#"{"config":{"rules":[{"type":"prepend","path":"README.md","content":"..."}]}}"#,
-        r#"{"config":{"rules":[{"type":"file","path":"new/file.rs","content":"..."}]}}"#,
+        r#"{"config":{"rules":[{"type":"append_once","path":"README.md","content":"..."}]}}"#,
+        r#"{"config":{"rules":[{"type":"managed_block","path":"README.md","start_marker":"<!-- genify:start -->","end_marker":"<!-- genify:end -->","content":"..."}]}}"#,
+        "{\"config\":{\"rules\":[{\"type\":\"insert_after\",\"path\":\"README.md\",\"marker\":\"## Usage\",\"content\":\"...\"}]}}",
+        r#"{"config":{"rules":[{"type":"move","from":"old.rs","to":"new.rs"}]}}"#,
+        r#"{"config":{"rules":[{"type":"write","path":"new/file.rs","content":"...","if_exists":"error"}]}}"#,
     )
 }

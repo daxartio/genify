@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Component, Path, PathBuf},
@@ -10,7 +11,8 @@ use similar::{ChangeTag, TextDiff};
 use thiserror::Error;
 
 use crate::{
-    Config, Error as GenifyError, Rule, Value, parse_toml, render_config_props, render_config_rules,
+    Config, Error as GenifyError, IfExists, Rule, Value, parse_toml, render_config_props,
+    render_config_rules,
 };
 
 #[derive(Debug, Error)]
@@ -128,9 +130,26 @@ impl GenerationCore {
         }
 
         let simulation = self.simulate(&prepared)?;
+        if !simulation.errors.is_empty() {
+            return Ok(ApplyOutput {
+                changed_files: Vec::new(),
+                summary: "No files changed because generation has errors.".to_string(),
+                warnings: plan.warnings,
+                errors: simulation.errors,
+            });
+        }
         let changed_files = simulation.changed_relative_paths();
 
         for change in simulation.changed_files() {
+            if change.deleted {
+                if change.path.exists() {
+                    fs::remove_file(&change.path).map_err(|source| CoreError::WriteFile {
+                        path: path_to_string(&change.path),
+                        source,
+                    })?;
+                }
+                continue;
+            }
             if let Some(parent) = change.path.parent() {
                 fs::create_dir_all(parent).map_err(|source| CoreError::CreateDirectory {
                     path: path_to_string(parent),
@@ -143,6 +162,24 @@ impl GenerationCore {
                     source,
                 }
             })?;
+        }
+        for change in &simulation.metadata_changes {
+            match change.kind {
+                MetadataChangeKind::Mkdir => {
+                    fs::create_dir_all(&change.path).map_err(|source| {
+                        CoreError::CreateDirectory {
+                            path: path_to_string(&change.path),
+                            source,
+                        }
+                    })?
+                }
+                MetadataChangeKind::Chmod => {
+                    let Some(mode) = change.mode else {
+                        continue;
+                    };
+                    set_mode(&change.path, mode)?;
+                }
+            }
         }
 
         let summary = summarize_changed_files(changed_files.len());
@@ -330,40 +367,277 @@ impl GenerationCore {
     ) -> Result<Vec<PreparedOperation>, CoreError> {
         let mut operations = Vec::with_capacity(config.rules.len());
         for rule in &config.rules {
-            let path = self
-                .sandbox
-                .resolve_generated_path(effective_root, rule_path(rule))?;
-            let relative_path = self.sandbox.display_path(&path);
             let operation = match rule {
-                Rule::File { content, .. } => PreparedOperation {
-                    kind: FileOperationKind::Create,
-                    path,
-                    relative_path,
-                    content: content.clone(),
+                Rule::Write {
+                    content, if_exists, ..
+                } => PreparedOperation {
+                    kind: FileOperationKind::Write,
+                    path: self.resolve_rule_path(effective_root, rule_path(rule))?,
+                    relative_path: self.relative_rule_path(effective_root, rule_path(rule))?,
+                    source_path: None,
+                    source_relative_path: None,
+                    target_path: None,
+                    target_relative_path: None,
+                    content: Some(content.clone()),
                     replace: None,
+                    replace_all: false,
+                    expected_matches: None,
+                    marker: None,
+                    start_marker: None,
+                    end_marker: None,
+                    mode: None,
+                    if_exists: Some(*if_exists),
+                },
+                Rule::Delete { .. } => PreparedOperation {
+                    kind: FileOperationKind::Delete,
+                    path: self.resolve_rule_path(effective_root, rule_path(rule))?,
+                    relative_path: self.relative_rule_path(effective_root, rule_path(rule))?,
+                    source_path: None,
+                    source_relative_path: None,
+                    target_path: None,
+                    target_relative_path: None,
+                    content: None,
+                    replace: None,
+                    replace_all: false,
+                    expected_matches: None,
+                    marker: None,
+                    start_marker: None,
+                    end_marker: None,
+                    mode: None,
+                    if_exists: None,
+                },
+                Rule::Rename { from, to } | Rule::Move { from, to } | Rule::Copy { from, to } => {
+                    let from_path = self.resolve_rule_path(effective_root, from)?;
+                    let to_path = self.resolve_rule_path(effective_root, to)?;
+                    PreparedOperation {
+                        kind: match rule {
+                            Rule::Rename { .. } => FileOperationKind::Rename,
+                            Rule::Move { .. } => FileOperationKind::Move,
+                            Rule::Copy { .. } => FileOperationKind::Copy,
+                            _ => unreachable!(),
+                        },
+                        path: to_path.clone(),
+                        relative_path: self.sandbox.display_path(&to_path),
+                        source_path: Some(from_path.clone()),
+                        source_relative_path: Some(self.sandbox.display_path(&from_path)),
+                        target_path: Some(to_path.clone()),
+                        target_relative_path: Some(self.sandbox.display_path(&to_path)),
+                        content: None,
+                        replace: None,
+                        replace_all: false,
+                        expected_matches: None,
+                        marker: None,
+                        start_marker: None,
+                        end_marker: None,
+                        mode: None,
+                        if_exists: None,
+                    }
+                }
+                Rule::Mkdir { .. } => PreparedOperation {
+                    kind: FileOperationKind::Mkdir,
+                    path: self.resolve_rule_path(effective_root, rule_path(rule))?,
+                    relative_path: self.relative_rule_path(effective_root, rule_path(rule))?,
+                    source_path: None,
+                    source_relative_path: None,
+                    target_path: None,
+                    target_relative_path: None,
+                    content: None,
+                    replace: None,
+                    replace_all: false,
+                    expected_matches: None,
+                    marker: None,
+                    start_marker: None,
+                    end_marker: None,
+                    mode: None,
+                    if_exists: None,
+                },
+                Rule::Chmod { mode, .. } => PreparedOperation {
+                    kind: FileOperationKind::Chmod,
+                    path: self.resolve_rule_path(effective_root, rule_path(rule))?,
+                    relative_path: self.relative_rule_path(effective_root, rule_path(rule))?,
+                    source_path: None,
+                    source_relative_path: None,
+                    target_path: None,
+                    target_relative_path: None,
+                    content: None,
+                    replace: None,
+                    replace_all: false,
+                    expected_matches: None,
+                    marker: None,
+                    start_marker: None,
+                    end_marker: None,
+                    mode: Some(
+                        parse_mode(mode).map_err(|message| CoreError::InvalidConfig {
+                            label: "inline config".to_string(),
+                            message,
+                        })?,
+                    ),
+                    if_exists: None,
                 },
                 Rule::Append { content, .. } => PreparedOperation {
                     kind: FileOperationKind::Append,
-                    path,
-                    relative_path,
-                    content: content.clone(),
+                    path: self.resolve_rule_path(effective_root, rule_path(rule))?,
+                    relative_path: self.relative_rule_path(effective_root, rule_path(rule))?,
+                    source_path: None,
+                    source_relative_path: None,
+                    target_path: None,
+                    target_relative_path: None,
+                    content: Some(content.clone()),
                     replace: None,
+                    replace_all: false,
+                    expected_matches: None,
+                    marker: None,
+                    start_marker: None,
+                    end_marker: None,
+                    mode: None,
+                    if_exists: None,
+                },
+                Rule::AppendOnce { content, .. } => PreparedOperation {
+                    kind: FileOperationKind::AppendOnce,
+                    path: self.resolve_rule_path(effective_root, rule_path(rule))?,
+                    relative_path: self.relative_rule_path(effective_root, rule_path(rule))?,
+                    source_path: None,
+                    source_relative_path: None,
+                    target_path: None,
+                    target_relative_path: None,
+                    content: Some(content.clone()),
+                    replace: None,
+                    replace_all: false,
+                    expected_matches: None,
+                    marker: None,
+                    start_marker: None,
+                    end_marker: None,
+                    mode: None,
+                    if_exists: None,
                 },
                 Rule::Prepend { content, .. } => PreparedOperation {
                     kind: FileOperationKind::Prepend,
-                    path,
-                    relative_path,
-                    content: content.clone(),
+                    path: self.resolve_rule_path(effective_root, rule_path(rule))?,
+                    relative_path: self.relative_rule_path(effective_root, rule_path(rule))?,
+                    source_path: None,
+                    source_relative_path: None,
+                    target_path: None,
+                    target_relative_path: None,
+                    content: Some(content.clone()),
                     replace: None,
+                    replace_all: false,
+                    expected_matches: None,
+                    marker: None,
+                    start_marker: None,
+                    end_marker: None,
+                    mode: None,
+                    if_exists: None,
+                },
+                Rule::InsertBefore {
+                    marker, content, ..
+                } => PreparedOperation {
+                    kind: FileOperationKind::InsertBefore,
+                    path: self.resolve_rule_path(effective_root, rule_path(rule))?,
+                    relative_path: self.relative_rule_path(effective_root, rule_path(rule))?,
+                    source_path: None,
+                    source_relative_path: None,
+                    target_path: None,
+                    target_relative_path: None,
+                    content: Some(content.clone()),
+                    replace: None,
+                    replace_all: false,
+                    expected_matches: None,
+                    marker: Some(marker.clone()),
+                    start_marker: None,
+                    end_marker: None,
+                    mode: None,
+                    if_exists: None,
+                },
+                Rule::InsertAfter {
+                    marker, content, ..
+                } => PreparedOperation {
+                    kind: FileOperationKind::InsertAfter,
+                    path: self.resolve_rule_path(effective_root, rule_path(rule))?,
+                    relative_path: self.relative_rule_path(effective_root, rule_path(rule))?,
+                    source_path: None,
+                    source_relative_path: None,
+                    target_path: None,
+                    target_relative_path: None,
+                    content: Some(content.clone()),
+                    replace: None,
+                    replace_all: false,
+                    expected_matches: None,
+                    marker: Some(marker.clone()),
+                    start_marker: None,
+                    end_marker: None,
+                    mode: None,
+                    if_exists: None,
                 },
                 Rule::Replace {
-                    replace, content, ..
+                    replace,
+                    content,
+                    replace_all,
+                    expected_matches,
+                    ..
                 } => PreparedOperation {
                     kind: FileOperationKind::Replace,
-                    path,
-                    relative_path,
-                    content: content.clone(),
+                    path: self.resolve_rule_path(effective_root, rule_path(rule))?,
+                    relative_path: self.relative_rule_path(effective_root, rule_path(rule))?,
+                    source_path: None,
+                    source_relative_path: None,
+                    target_path: None,
+                    target_relative_path: None,
+                    content: Some(content.clone()),
                     replace: Some(replace.clone()),
+                    replace_all: *replace_all,
+                    expected_matches: *expected_matches,
+                    marker: None,
+                    start_marker: None,
+                    end_marker: None,
+                    mode: None,
+                    if_exists: None,
+                },
+                Rule::ReplaceOrAppend {
+                    replace,
+                    content,
+                    replace_all,
+                    expected_matches,
+                    ..
+                } => PreparedOperation {
+                    kind: FileOperationKind::ReplaceOrAppend,
+                    path: self.resolve_rule_path(effective_root, rule_path(rule))?,
+                    relative_path: self.relative_rule_path(effective_root, rule_path(rule))?,
+                    source_path: None,
+                    source_relative_path: None,
+                    target_path: None,
+                    target_relative_path: None,
+                    content: Some(content.clone()),
+                    replace: Some(replace.clone()),
+                    replace_all: *replace_all,
+                    expected_matches: *expected_matches,
+                    marker: None,
+                    start_marker: None,
+                    end_marker: None,
+                    mode: None,
+                    if_exists: None,
+                },
+                Rule::ManagedBlock {
+                    start_marker,
+                    end_marker,
+                    content,
+                    ..
+                } => PreparedOperation {
+                    kind: FileOperationKind::ManagedBlock,
+                    path: self.resolve_rule_path(effective_root, rule_path(rule))?,
+                    relative_path: self.relative_rule_path(effective_root, rule_path(rule))?,
+                    source_path: None,
+                    source_relative_path: None,
+                    target_path: None,
+                    target_relative_path: None,
+                    content: Some(content.clone()),
+                    replace: None,
+                    replace_all: false,
+                    expected_matches: None,
+                    marker: None,
+                    start_marker: Some(start_marker.clone()),
+                    end_marker: Some(end_marker.clone()),
+                    mode: None,
+                    if_exists: None,
                 },
             };
             operations.push(operation);
@@ -371,38 +645,33 @@ impl GenerationCore {
         Ok(operations)
     }
 
+    fn resolve_rule_path(&self, effective_root: &Path, raw: &str) -> Result<PathBuf, CoreError> {
+        self.sandbox.resolve_generated_path(effective_root, raw)
+    }
+
+    fn relative_rule_path(&self, effective_root: &Path, raw: &str) -> Result<String, CoreError> {
+        let path = self.resolve_rule_path(effective_root, raw)?;
+        Ok(self.sandbox.display_path(&path))
+    }
+
     fn simulate(&self, prepared: &PreparedGeneration) -> Result<Simulation, CoreError> {
         let mut files: BTreeMap<PathBuf, SimulatedFile> = BTreeMap::new();
         let mut warnings = Vec::new();
         let mut errors = Vec::new();
+        let mut metadata_changes = Vec::new();
 
         for operation in &prepared.operations {
-            let file = match files.get_mut(&operation.path) {
-                Some(file) => file,
-                None => {
-                    let original = read_optional_string(&operation.path)?;
-                    let current = original.clone().unwrap_or_default();
-                    files.insert(
-                        operation.path.clone(),
-                        SimulatedFile {
-                            path: operation.path.clone(),
-                            relative_path: operation.relative_path.clone(),
-                            original: current.clone(),
-                            current,
-                            existed: original.is_some(),
-                        },
-                    );
-                    files
-                        .get_mut(&operation.path)
-                        .expect("simulated file was just inserted")
-                }
-            };
-
-            operation.simulate(file, &mut warnings, &mut errors);
+            operation.simulate(
+                &mut files,
+                &mut metadata_changes,
+                &mut warnings,
+                &mut errors,
+            )?;
         }
 
         Ok(Simulation {
             files,
+            metadata_changes,
             warnings,
             errors,
         })
@@ -688,18 +957,34 @@ pub enum TemplateKind {
 pub struct PlannedFileOperation {
     pub operation: FileOperationKind,
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_path: Option<String>,
     pub exists: bool,
     pub will_create: bool,
     pub will_modify: bool,
+    pub will_delete: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileOperationKind {
-    Create,
+    Write,
+    Delete,
+    Rename,
+    Move,
+    Copy,
+    Mkdir,
+    Chmod,
     Append,
+    AppendOnce,
     Prepend,
+    InsertBefore,
+    InsertAfter,
     Replace,
+    ReplaceOrAppend,
+    ManagedBlock,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -779,10 +1064,20 @@ impl PreparedGeneration {
 
         for operation in &self.operations {
             let exists = operation.path.exists();
-            if operation.kind == FileOperationKind::Create && exists {
+            if operation.kind == FileOperationKind::Write
+                && operation.if_exists == Some(IfExists::Error)
+                && exists
+            {
                 errors.push(Diagnostic::error(
                     "file_exists",
-                    "file rule cannot create a file that already exists",
+                    "write rule cannot write an existing file when if_exists is error",
+                    Some(operation.relative_path.clone()),
+                ));
+            }
+            if operation.kind == FileOperationKind::Copy && exists {
+                errors.push(Diagnostic::error(
+                    "file_exists",
+                    "operation cannot create a target that already exists",
                     Some(operation.relative_path.clone()),
                 ));
             }
@@ -795,12 +1090,24 @@ impl PreparedGeneration {
             }
 
             affected_paths.insert(operation.relative_path.clone());
+            if let Some(source) = &operation.source_relative_path {
+                affected_paths.insert(source.clone());
+            }
+            if let Some(target) = &operation.target_relative_path {
+                affected_paths.insert(target.clone());
+            }
             operations.push(PlannedFileOperation {
                 operation: operation.kind,
                 path: operation.relative_path.clone(),
+                source_path: operation.source_relative_path.clone(),
+                target_path: operation.target_relative_path.clone(),
                 exists,
-                will_create: !exists,
-                will_modify: exists || operation.kind != FileOperationKind::Create,
+                will_create: operation.will_create(exists),
+                will_modify: operation.will_modify(exists),
+                will_delete: matches!(
+                    operation.kind,
+                    FileOperationKind::Delete | FileOperationKind::Rename | FileOperationKind::Move
+                ),
             });
         }
 
@@ -818,40 +1125,229 @@ struct PreparedOperation {
     kind: FileOperationKind,
     path: PathBuf,
     relative_path: String,
-    content: String,
+    source_path: Option<PathBuf>,
+    source_relative_path: Option<String>,
+    target_path: Option<PathBuf>,
+    target_relative_path: Option<String>,
+    content: Option<String>,
     replace: Option<regex::Regex>,
+    replace_all: bool,
+    expected_matches: Option<usize>,
+    marker: Option<String>,
+    start_marker: Option<String>,
+    end_marker: Option<String>,
+    mode: Option<u32>,
+    if_exists: Option<IfExists>,
 }
 
 impl PreparedOperation {
+    fn will_create(&self, exists: bool) -> bool {
+        if self.kind == FileOperationKind::Write {
+            return !exists;
+        }
+        matches!(
+            self.kind,
+            FileOperationKind::Copy
+                | FileOperationKind::Rename
+                | FileOperationKind::Move
+                | FileOperationKind::Mkdir
+        ) && !exists
+    }
+
+    fn will_modify(&self, exists: bool) -> bool {
+        if self.kind == FileOperationKind::Write {
+            return exists && self.if_exists == Some(IfExists::Overwrite);
+        }
+        matches!(
+            self.kind,
+            FileOperationKind::Append
+                | FileOperationKind::AppendOnce
+                | FileOperationKind::Prepend
+                | FileOperationKind::InsertBefore
+                | FileOperationKind::InsertAfter
+                | FileOperationKind::Replace
+                | FileOperationKind::ReplaceOrAppend
+                | FileOperationKind::ManagedBlock
+                | FileOperationKind::Chmod
+        ) && exists
+    }
+
     fn simulate(
         &self,
-        file: &mut SimulatedFile,
+        files: &mut BTreeMap<PathBuf, SimulatedFile>,
+        metadata_changes: &mut Vec<MetadataChange>,
         warnings: &mut Vec<Diagnostic>,
         errors: &mut Vec<Diagnostic>,
-    ) {
+    ) -> Result<(), CoreError> {
         match self.kind {
-            FileOperationKind::Create => {
-                if file.existed {
-                    errors.push(Diagnostic::error(
-                        "file_exists",
-                        "file rule cannot create a file that already exists",
+            FileOperationKind::Write => {
+                let file = simulated_file(files, &self.path, &self.relative_path)?;
+                let if_exists = self.if_exists()?;
+                if file.existed && !file.deleted {
+                    match if_exists {
+                        IfExists::Error => {
+                            errors.push(Diagnostic::error(
+                                "file_exists",
+                                "write rule cannot write an existing file when if_exists is error",
+                                Some(file.relative_path.clone()),
+                            ));
+                            return Ok(());
+                        }
+                        IfExists::Skip => return Ok(()),
+                        IfExists::Overwrite => {}
+                    }
+                }
+                file.current = format!("{}\n", self.content()?.trim_end());
+                file.deleted = false;
+                file.existed = true;
+            }
+            FileOperationKind::Delete => {
+                let file = simulated_file(files, &self.path, &self.relative_path)?;
+                if !file.existed {
+                    warnings.push(Diagnostic::warning(
+                        "missing_delete_target",
+                        "delete target does not exist",
                         Some(file.relative_path.clone()),
                     ));
-                    return;
                 }
-                file.current = format!("{}\n", self.content.trim_end());
-                file.existed = true;
+                file.current.clear();
+                file.deleted = true;
+            }
+            FileOperationKind::Rename | FileOperationKind::Move => {
+                let source_path = self.source_path()?;
+                let source_relative_path = self.source_relative_path()?;
+                let target_path = self.target_path()?;
+                let target_relative_path = self.target_relative_path()?;
+                let source_content = {
+                    let source = simulated_file(files, source_path, source_relative_path)?;
+                    if !source.existed || source.deleted {
+                        errors.push(Diagnostic::error(
+                            "missing_source",
+                            "move source does not exist",
+                            Some(source.relative_path.clone()),
+                        ));
+                        return Ok(());
+                    }
+                    source.current.clone()
+                };
+                {
+                    let target = simulated_file(files, target_path, target_relative_path)?;
+                    if target.existed && !target.deleted {
+                        errors.push(Diagnostic::error(
+                            "target_exists",
+                            "move target already exists",
+                            Some(target.relative_path.clone()),
+                        ));
+                        return Ok(());
+                    }
+                    target.current = source_content;
+                    target.deleted = false;
+                    target.existed = true;
+                }
+                let source = simulated_file(files, source_path, source_relative_path)?;
+                source.current.clear();
+                source.deleted = true;
+            }
+            FileOperationKind::Copy => {
+                let source_path = self.source_path()?;
+                let source_relative_path = self.source_relative_path()?;
+                let target_path = self.target_path()?;
+                let target_relative_path = self.target_relative_path()?;
+                let source_content = {
+                    let source = simulated_file(files, source_path, source_relative_path)?;
+                    if !source.existed || source.deleted {
+                        errors.push(Diagnostic::error(
+                            "missing_source",
+                            "copy source does not exist",
+                            Some(source.relative_path.clone()),
+                        ));
+                        return Ok(());
+                    }
+                    source.current.clone()
+                };
+                let target = simulated_file(files, target_path, target_relative_path)?;
+                if target.existed && !target.deleted {
+                    errors.push(Diagnostic::error(
+                        "target_exists",
+                        "copy target already exists",
+                        Some(target.relative_path.clone()),
+                    ));
+                    return Ok(());
+                }
+                target.current = source_content;
+                target.deleted = false;
+                target.existed = true;
+            }
+            FileOperationKind::Mkdir => {
+                metadata_changes.push(MetadataChange {
+                    kind: MetadataChangeKind::Mkdir,
+                    path: self.path.clone(),
+                    relative_path: self.relative_path.clone(),
+                    mode: None,
+                });
+            }
+            FileOperationKind::Chmod => {
+                metadata_changes.push(MetadataChange {
+                    kind: MetadataChangeKind::Chmod,
+                    path: self.path.clone(),
+                    relative_path: self.relative_path.clone(),
+                    mode: self.mode,
+                });
             }
             FileOperationKind::Append => {
+                let file = simulated_file(files, &self.path, &self.relative_path)?;
                 file.current
-                    .push_str(&format!("{}\n", self.content.trim_end()));
+                    .push_str(&format!("{}\n", self.content()?.trim_end()));
+                file.deleted = false;
                 file.existed = true;
             }
+            FileOperationKind::AppendOnce => {
+                let file = simulated_file(files, &self.path, &self.relative_path)?;
+                let content = self.content()?.trim_end();
+                if !file.current.contains(content) {
+                    file.current.push_str(&format!("{content}\n"));
+                    file.deleted = false;
+                    file.existed = true;
+                }
+            }
             FileOperationKind::Prepend => {
-                file.current = format!("{}\n{}\n", self.content, file.current.trim_end());
+                let file = simulated_file(files, &self.path, &self.relative_path)?;
+                file.current = format!("{}\n{}\n", self.content()?, file.current.trim_end());
+                file.deleted = false;
+                file.existed = true;
+            }
+            FileOperationKind::InsertBefore => {
+                let file = simulated_file(files, &self.path, &self.relative_path)?;
+                let Some(updated) = insert_before(&file.current, self.marker()?, self.content()?)
+                else {
+                    errors.push(Diagnostic::error(
+                        "missing_marker",
+                        "insert_before marker was not found",
+                        Some(file.relative_path.clone()),
+                    ));
+                    return Ok(());
+                };
+                file.current = updated;
+                file.deleted = false;
+                file.existed = true;
+            }
+            FileOperationKind::InsertAfter => {
+                let file = simulated_file(files, &self.path, &self.relative_path)?;
+                let Some(updated) = insert_after(&file.current, self.marker()?, self.content()?)
+                else {
+                    errors.push(Diagnostic::error(
+                        "missing_marker",
+                        "insert_after marker was not found",
+                        Some(file.relative_path.clone()),
+                    ));
+                    return Ok(());
+                };
+                file.current = updated;
+                file.deleted = false;
                 file.existed = true;
             }
             FileOperationKind::Replace => {
+                let file = simulated_file(files, &self.path, &self.relative_path)?;
                 if !file.existed {
                     warnings.push(Diagnostic::warning(
                         "missing_replace_target",
@@ -865,13 +1361,168 @@ impl PreparedOperation {
                         "replace rule is missing a regex",
                         Some(file.relative_path.clone()),
                     ));
-                    return;
+                    return Ok(());
                 };
-                let replaced = replace.replacen(&file.current, 1, self.content.as_str());
+                let replaced = match replace_content(
+                    &file.current,
+                    replace,
+                    self.content()?,
+                    self.replace_all,
+                    self.expected_matches,
+                ) {
+                    Ok(replaced) => replaced.into_owned(),
+                    Err(message) => {
+                        errors.push(Diagnostic::error(
+                            "replace_match_count",
+                            message,
+                            Some(file.relative_path.clone()),
+                        ));
+                        return Ok(());
+                    }
+                };
                 file.current = format!("{}\n", replaced.trim_end());
+                file.deleted = false;
+                file.existed = true;
+            }
+            FileOperationKind::ReplaceOrAppend => {
+                let file = simulated_file(files, &self.path, &self.relative_path)?;
+                let Some(replace) = &self.replace else {
+                    errors.push(Diagnostic::error(
+                        "missing_replace_regex",
+                        "replace_or_append rule is missing a regex",
+                        Some(file.relative_path.clone()),
+                    ));
+                    return Ok(());
+                };
+                if replace.is_match(&file.current) {
+                    let replaced = match replace_content(
+                        &file.current,
+                        replace,
+                        self.content()?,
+                        self.replace_all,
+                        self.expected_matches,
+                    ) {
+                        Ok(replaced) => replaced.into_owned(),
+                        Err(message) => {
+                            errors.push(Diagnostic::error(
+                                "replace_match_count",
+                                message,
+                                Some(file.relative_path.clone()),
+                            ));
+                            return Ok(());
+                        }
+                    };
+                    file.current = format!("{}\n", replaced.trim_end());
+                } else {
+                    file.current
+                        .push_str(&format!("{}\n", self.content()?.trim_end()));
+                }
+                file.deleted = false;
+                file.existed = true;
+            }
+            FileOperationKind::ManagedBlock => {
+                let file = simulated_file(files, &self.path, &self.relative_path)?;
+                let updated = match upsert_managed_block(
+                    &file.current,
+                    self.start_marker()?,
+                    self.end_marker()?,
+                    self.content()?,
+                ) {
+                    Ok(updated) => updated,
+                    Err(message) => {
+                        errors.push(Diagnostic::error(
+                            "invalid_managed_block",
+                            message,
+                            Some(file.relative_path.clone()),
+                        ));
+                        return Ok(());
+                    }
+                };
+                file.current = format!("{}\n", updated.trim_end());
+                file.deleted = false;
                 file.existed = true;
             }
         }
+        Ok(())
+    }
+
+    fn content(&self) -> Result<&str, CoreError> {
+        self.content
+            .as_deref()
+            .ok_or_else(|| CoreError::InvalidConfig {
+                label: "inline config".to_string(),
+                message: "operation is missing content".to_string(),
+            })
+    }
+
+    fn if_exists(&self) -> Result<IfExists, CoreError> {
+        self.if_exists.ok_or_else(|| CoreError::InvalidConfig {
+            label: "inline config".to_string(),
+            message: "write operation is missing if_exists".to_string(),
+        })
+    }
+
+    fn marker(&self) -> Result<&str, CoreError> {
+        self.marker
+            .as_deref()
+            .ok_or_else(|| CoreError::InvalidConfig {
+                label: "inline config".to_string(),
+                message: "operation is missing marker".to_string(),
+            })
+    }
+
+    fn start_marker(&self) -> Result<&str, CoreError> {
+        self.start_marker
+            .as_deref()
+            .ok_or_else(|| CoreError::InvalidConfig {
+                label: "inline config".to_string(),
+                message: "operation is missing start_marker".to_string(),
+            })
+    }
+
+    fn end_marker(&self) -> Result<&str, CoreError> {
+        self.end_marker
+            .as_deref()
+            .ok_or_else(|| CoreError::InvalidConfig {
+                label: "inline config".to_string(),
+                message: "operation is missing end_marker".to_string(),
+            })
+    }
+
+    fn source_path(&self) -> Result<&Path, CoreError> {
+        self.source_path
+            .as_deref()
+            .ok_or_else(|| CoreError::InvalidConfig {
+                label: "inline config".to_string(),
+                message: "operation is missing source path".to_string(),
+            })
+    }
+
+    fn source_relative_path(&self) -> Result<&str, CoreError> {
+        self.source_relative_path
+            .as_deref()
+            .ok_or_else(|| CoreError::InvalidConfig {
+                label: "inline config".to_string(),
+                message: "operation is missing source path".to_string(),
+            })
+    }
+
+    fn target_path(&self) -> Result<&Path, CoreError> {
+        self.target_path
+            .as_deref()
+            .ok_or_else(|| CoreError::InvalidConfig {
+                label: "inline config".to_string(),
+                message: "operation is missing target path".to_string(),
+            })
+    }
+
+    fn target_relative_path(&self) -> Result<&str, CoreError> {
+        self.target_relative_path
+            .as_deref()
+            .ok_or_else(|| CoreError::InvalidConfig {
+                label: "inline config".to_string(),
+                message: "operation is missing target path".to_string(),
+            })
     }
 }
 
@@ -882,28 +1533,53 @@ struct SimulatedFile {
     original: String,
     current: String,
     existed: bool,
+    deleted: bool,
 }
 
 #[derive(Debug, Clone)]
 struct Simulation {
     files: BTreeMap<PathBuf, SimulatedFile>,
+    metadata_changes: Vec<MetadataChange>,
     warnings: Vec<Diagnostic>,
     errors: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Clone)]
+struct MetadataChange {
+    kind: MetadataChangeKind,
+    path: PathBuf,
+    relative_path: String,
+    mode: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MetadataChangeKind {
+    Mkdir,
+    Chmod,
 }
 
 impl Simulation {
     fn changed_files(&self) -> Vec<&SimulatedFile> {
         self.files
             .values()
-            .filter(|file| file.original != file.current)
+            .filter(|file| file.original != file.current || (file.existed && file.deleted))
             .collect()
     }
 
     fn changed_relative_paths(&self) -> Vec<String> {
-        self.changed_files()
+        let mut paths = self
+            .changed_files()
             .into_iter()
             .map(|file| file.relative_path.clone())
-            .collect()
+            .collect::<Vec<_>>();
+        paths.extend(
+            self.metadata_changes
+                .iter()
+                .map(|change| change.relative_path.clone()),
+        );
+        paths.sort();
+        paths.dedup();
+        paths
     }
 
     fn diff_output(&self, mut plan_warnings: Vec<Diagnostic>) -> DiffOutput {
@@ -963,11 +1639,141 @@ impl Simulation {
 
 fn rule_path(rule: &Rule) -> &str {
     match rule {
-        Rule::File { path, .. }
+        Rule::Write { path, .. }
+        | Rule::Delete { path }
+        | Rule::Mkdir { path }
+        | Rule::Chmod { path, .. }
         | Rule::Append { path, .. }
+        | Rule::AppendOnce { path, .. }
         | Rule::Prepend { path, .. }
-        | Rule::Replace { path, .. } => path,
+        | Rule::InsertBefore { path, .. }
+        | Rule::InsertAfter { path, .. }
+        | Rule::Replace { path, .. }
+        | Rule::ReplaceOrAppend { path, .. }
+        | Rule::ManagedBlock { path, .. } => path,
+        Rule::Rename { to, .. } | Rule::Move { to, .. } | Rule::Copy { to, .. } => to,
     }
+}
+
+fn simulated_file<'a>(
+    files: &'a mut BTreeMap<PathBuf, SimulatedFile>,
+    path: &Path,
+    relative_path: &str,
+) -> Result<&'a mut SimulatedFile, CoreError> {
+    if !files.contains_key(path) {
+        let original = read_optional_string(path)?;
+        let current = original.clone().unwrap_or_default();
+        files.insert(
+            path.to_path_buf(),
+            SimulatedFile {
+                path: path.to_path_buf(),
+                relative_path: relative_path.to_string(),
+                original: current.clone(),
+                current,
+                existed: original.is_some(),
+                deleted: false,
+            },
+        );
+    }
+    files.get_mut(path).ok_or_else(|| CoreError::InvalidConfig {
+        label: "simulation".to_string(),
+        message: "failed to load simulated file".to_string(),
+    })
+}
+
+fn replace_content<'a>(
+    file_content: &'a str,
+    replace: &regex::Regex,
+    content: &str,
+    replace_all: bool,
+    expected_matches: Option<usize>,
+) -> Result<Cow<'a, str>, String> {
+    let matches = replace.find_iter(file_content).count();
+    let expected = expected_matches.unwrap_or(1);
+    if !replace_all && matches != expected {
+        return Err(format!("expected {expected} matches, found {matches}"));
+    }
+
+    if replace_all {
+        Ok(replace.replace_all(file_content, content))
+    } else {
+        Ok(replace.replacen(file_content, 1, content))
+    }
+}
+
+fn insert_before(file_content: &str, marker: &str, content: &str) -> Option<String> {
+    let index = file_content.find(marker)?;
+    let mut updated = String::with_capacity(file_content.len() + content.len() + 1);
+    updated.push_str(&file_content[..index]);
+    updated.push_str(content.trim_end());
+    updated.push('\n');
+    updated.push_str(&file_content[index..]);
+    Some(updated)
+}
+
+fn insert_after(file_content: &str, marker: &str, content: &str) -> Option<String> {
+    let index = file_content.find(marker)? + marker.len();
+    let mut updated = String::with_capacity(file_content.len() + content.len() + 1);
+    updated.push_str(&file_content[..index]);
+    updated.push('\n');
+    updated.push_str(content.trim_end());
+    updated.push_str(&file_content[index..]);
+    Some(updated)
+}
+
+fn upsert_managed_block(
+    file_content: &str,
+    start_marker: &str,
+    end_marker: &str,
+    content: &str,
+) -> Result<String, String> {
+    let block = format!("{start_marker}\n{}\n{end_marker}", content.trim_end());
+    let start_count = file_content.matches(start_marker).count();
+    let end_count = file_content.matches(end_marker).count();
+    if start_count > 1 || end_count > 1 {
+        return Err("managed block markers must be unique".to_string());
+    }
+
+    match (
+        file_content.find(start_marker),
+        file_content.find(end_marker),
+    ) {
+        (Some(start), Some(end)) if start <= end => {
+            let end_index = end + end_marker.len();
+            Ok(format!(
+                "{}{}{}",
+                &file_content[..start],
+                block,
+                &file_content[end_index..]
+            ))
+        }
+        (None, None) => Ok(format!("{}{}\n", file_content, block)),
+        _ => Err("managed block requires both start_marker and end_marker".to_string()),
+    }
+}
+
+fn parse_mode(mode: &str) -> Result<u32, String> {
+    u32::from_str_radix(mode.trim_start_matches("0o"), 8)
+        .map_err(|err| format!("invalid chmod mode `{mode}`: {err}"))
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> Result<(), CoreError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let permissions = fs::Permissions::from_mode(mode);
+    fs::set_permissions(path, permissions).map_err(|source| CoreError::WriteFile {
+        path: path_to_string(path),
+        source,
+    })
+}
+
+#[cfg(not(unix))]
+fn set_mode(path: &Path, _mode: u32) -> Result<(), CoreError> {
+    Err(CoreError::InvalidConfig {
+        label: path_to_string(path),
+        message: "chmod is only supported on Unix platforms".to_string(),
+    })
 }
 
 fn parse_json_config(value: &JsonValue) -> Result<Config, String> {
@@ -1105,6 +1911,18 @@ fn config_hint() -> ConfigHint {
                 }),
             },
             ConfigExample {
+                operation: FileOperationKind::AppendOnce,
+                config: json!({
+                    "rules": [
+                        {
+                            "type": "append_once",
+                            "path": "README.md",
+                            "content": "..."
+                        }
+                    ]
+                }),
+            },
+            ConfigExample {
                 operation: FileOperationKind::Prepend,
                 config: json!({
                     "rules": [
@@ -1117,13 +1935,53 @@ fn config_hint() -> ConfigHint {
                 }),
             },
             ConfigExample {
-                operation: FileOperationKind::Create,
+                operation: FileOperationKind::InsertAfter,
                 config: json!({
                     "rules": [
                         {
-                            "type": "file",
-                            "path": "new/file.rs",
+                            "type": "insert_after",
+                            "path": "README.md",
+                            "marker": "## Usage",
                             "content": "..."
+                        }
+                    ]
+                }),
+            },
+            ConfigExample {
+                operation: FileOperationKind::ManagedBlock,
+                config: json!({
+                    "rules": [
+                        {
+                            "type": "managed_block",
+                            "path": "README.md",
+                            "start_marker": "<!-- genify:start -->",
+                            "end_marker": "<!-- genify:end -->",
+                            "content": "..."
+                        }
+                    ]
+                }),
+            },
+            ConfigExample {
+                operation: FileOperationKind::Write,
+                config: json!({
+                    "rules": [
+                        {
+                            "type": "write",
+                            "path": "new/file.rs",
+                            "content": "...",
+                            "if_exists": "error"
+                        }
+                    ]
+                }),
+            },
+            ConfigExample {
+                operation: FileOperationKind::Move,
+                config: json!({
+                    "rules": [
+                        {
+                            "type": "move",
+                            "from": "old/file.rs",
+                            "to": "new/file.rs"
                         }
                     ]
                 }),
@@ -1147,9 +2005,10 @@ mod tests {
                 config: Some(json!({
                     "rules": [
                         {
-                            "type": "file",
+                            "type": "write",
                             "path": "../outside.txt",
-                            "content": "nope"
+                            "content": "nope",
+                            "if_exists": "error"
                         }
                     ]
                 })),
@@ -1174,9 +2033,10 @@ mod tests {
                     },
                     "rules": [
                         {
-                            "type": "file",
+                            "type": "write",
                             "path": "out.txt",
-                            "content": "Hello {{ name }}"
+                            "content": "Hello {{ name }}",
+                            "if_exists": "error"
                         }
                     ]
                 })),
@@ -1200,9 +2060,10 @@ mod tests {
                 config: Some(json!({
                     "rules": [
                         {
-                            "type": "file",
+                            "type": "write",
                             "path": "out.txt",
-                            "content": "Hello"
+                            "content": "Hello",
+                            "if_exists": "error"
                         }
                     ]
                 })),
@@ -1212,6 +2073,98 @@ mod tests {
 
         assert!(matches!(err, CoreError::ApprovalRequired));
         assert!(!root.join("out.txt").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn write_if_exists_overwrite_replaces_existing_file() {
+        let root = temp_root("write-overwrite");
+        fs::write(root.join("out.txt"), "old\n").expect("test file should be written");
+        let core = GenerationCore::new(&root).expect("root should be valid");
+
+        let output = core
+            .apply(ApplyRequest {
+                config: Some(json!({
+                    "rules": [
+                        {
+                            "type": "write",
+                            "path": "out.txt",
+                            "content": "new",
+                            "if_exists": "overwrite"
+                        }
+                    ]
+                })),
+                explicit_approval: true,
+                ..ApplyRequest::default()
+            })
+            .expect("write overwrite should apply");
+
+        assert_eq!(output.changed_files, vec!["out.txt"]);
+        assert_eq!(
+            fs::read_to_string(root.join("out.txt")).expect("file should exist"),
+            "new\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn write_if_exists_skip_keeps_existing_file() {
+        let root = temp_root("write-skip");
+        fs::write(root.join("out.txt"), "old\n").expect("test file should be written");
+        let core = GenerationCore::new(&root).expect("root should be valid");
+
+        let output = core
+            .apply(ApplyRequest {
+                config: Some(json!({
+                    "rules": [
+                        {
+                            "type": "write",
+                            "path": "out.txt",
+                            "content": "new",
+                            "if_exists": "skip"
+                        }
+                    ]
+                })),
+                explicit_approval: true,
+                ..ApplyRequest::default()
+            })
+            .expect("write skip should apply");
+
+        assert!(output.changed_files.is_empty());
+        assert_eq!(
+            fs::read_to_string(root.join("out.txt")).expect("file should exist"),
+            "old\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn write_if_exists_error_reports_existing_file() {
+        let root = temp_root("write-error");
+        fs::write(root.join("out.txt"), "old\n").expect("test file should be written");
+        let core = GenerationCore::new(&root).expect("root should be valid");
+
+        let output = core
+            .diff(GenerationRequest {
+                config: Some(json!({
+                    "rules": [
+                        {
+                            "type": "write",
+                            "path": "out.txt",
+                            "content": "new",
+                            "if_exists": "error"
+                        }
+                    ]
+                })),
+                ..GenerationRequest::default()
+            })
+            .expect("write error should return structured output");
+
+        assert_eq!(output.errors[0].code, "file_exists");
+        assert_eq!(
+            fs::read_to_string(root.join("out.txt")).expect("file should exist"),
+            "old\n"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1231,6 +2184,192 @@ mod tests {
         assert_eq!(
             output.hint.expect("hint should be returned").minimal_config["rules"][0]["type"],
             "replace"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn append_once_is_idempotent() {
+        let root = temp_root("append-once");
+        let core = GenerationCore::new(&root).expect("root should be valid");
+        let config = json!({
+            "rules": [
+                {
+                    "type": "append_once",
+                    "path": "README.md",
+                    "content": "managed line"
+                }
+            ]
+        });
+
+        let first = core
+            .apply(ApplyRequest {
+                config: Some(config.clone()),
+                explicit_approval: true,
+                ..ApplyRequest::default()
+            })
+            .expect("first apply should succeed");
+        let second = core
+            .apply(ApplyRequest {
+                config: Some(config),
+                explicit_approval: true,
+                ..ApplyRequest::default()
+            })
+            .expect("second apply should succeed");
+
+        assert_eq!(first.changed_files, vec!["README.md"]);
+        assert!(second.changed_files.is_empty());
+        assert_eq!(
+            fs::read_to_string(root.join("README.md")).expect("file should exist"),
+            "managed line\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replace_expected_matches_reports_error() {
+        let root = temp_root("replace-expected");
+        fs::write(root.join("app.rs"), "old\nold\n").expect("test file should be written");
+        let core = GenerationCore::new(&root).expect("root should be valid");
+
+        let output = core
+            .diff(GenerationRequest {
+                config: Some(json!({
+                    "rules": [
+                        {
+                            "type": "replace",
+                            "path": "app.rs",
+                            "replace": "old",
+                            "content": "new",
+                            "expected_matches": 1
+                        }
+                    ]
+                })),
+                ..GenerationRequest::default()
+            })
+            .expect("diff should return structured errors");
+
+        assert_eq!(output.errors[0].code, "replace_match_count");
+        assert!(output.errors[0].message.contains("expected 1 matches"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn managed_block_is_idempotent() {
+        let root = temp_root("managed-block");
+        fs::write(root.join("README.md"), "Intro\n").expect("test file should be written");
+        let core = GenerationCore::new(&root).expect("root should be valid");
+        let config = json!({
+            "rules": [
+                {
+                    "type": "managed_block",
+                    "path": "README.md",
+                    "start_marker": "<!-- genify:start -->",
+                    "end_marker": "<!-- genify:end -->",
+                    "content": "Generated"
+                }
+            ]
+        });
+
+        core.apply(ApplyRequest {
+            config: Some(config.clone()),
+            explicit_approval: true,
+            ..ApplyRequest::default()
+        })
+        .expect("first apply should succeed");
+        let second = core
+            .apply(ApplyRequest {
+                config: Some(config),
+                explicit_approval: true,
+                ..ApplyRequest::default()
+            })
+            .expect("second apply should succeed");
+
+        assert!(second.changed_files.is_empty());
+        assert_eq!(
+            fs::read_to_string(root.join("README.md")).expect("file should exist"),
+            "Intro\n<!-- genify:start -->\nGenerated\n<!-- genify:end -->\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn copy_move_delete_and_mkdir_apply() {
+        let root = temp_root("file-ops");
+        fs::write(root.join("source.txt"), "source\n").expect("test file should be written");
+        let core = GenerationCore::new(&root).expect("root should be valid");
+
+        let output = core
+            .apply(ApplyRequest {
+                config: Some(json!({
+                    "rules": [
+                        {
+                            "type": "copy",
+                            "from": "source.txt",
+                            "to": "copy.txt"
+                        },
+                        {
+                            "type": "move",
+                            "from": "copy.txt",
+                            "to": "moved.txt"
+                        },
+                        {
+                            "type": "delete",
+                            "path": "source.txt"
+                        },
+                        {
+                            "type": "mkdir",
+                            "path": "nested/dir"
+                        }
+                    ]
+                })),
+                explicit_approval: true,
+                ..ApplyRequest::default()
+            })
+            .expect("file operations should apply");
+
+        assert!(output.errors.is_empty());
+        assert!(!root.join("source.txt").exists());
+        assert!(!root.join("copy.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join("moved.txt")).expect("moved file should exist"),
+            "source\n"
+        );
+        assert!(root.join("nested/dir").is_dir());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn insert_before_and_after_marker() {
+        let root = temp_root("insert-marker");
+        fs::write(root.join("README.md"), "A\nMARK\nZ\n").expect("test file should be written");
+        let core = GenerationCore::new(&root).expect("root should be valid");
+
+        core.apply(ApplyRequest {
+            config: Some(json!({
+                "rules": [
+                    {
+                        "type": "insert_before",
+                        "path": "README.md",
+                        "marker": "MARK",
+                        "content": "before"
+                    },
+                    {
+                        "type": "insert_after",
+                        "path": "README.md",
+                        "marker": "MARK",
+                        "content": "after"
+                    }
+                ]
+            })),
+            explicit_approval: true,
+            ..ApplyRequest::default()
+        })
+        .expect("insert operations should apply");
+
+        assert_eq!(
+            fs::read_to_string(root.join("README.md")).expect("file should exist"),
+            "A\nbefore\nMARK\nafter\nZ\n"
         );
         let _ = fs::remove_dir_all(root);
     }

@@ -1,5 +1,9 @@
 # genify
 
+**MCP tool for AI coding agents to safely plan, diff, and apply structured file changes inside a project root.**
+
+Use `genify` for repeatable codebase edits: writing files, replacing text, inserting blocks around markers, moving/copying/deleting paths, creating directories, changing modes, and generating dry-run diffs before applying changes.
+
 [![Crates.io](https://img.shields.io/crates/v/genify.svg)](https://crates.io/crates/genify)
 [![Docs.rs](https://docs.rs/genify/badge.svg)](https://docs.rs/genify)
 [![CI](https://img.shields.io/github/actions/workflow/status/daxartio/genify/ci.yml?branch=main)](https://github.com/daxartio/genify/actions)
@@ -9,7 +13,7 @@
 
 The main idea is to have a single source file that can be used to generate or update a full project structure quickly and consistently using different configuration files.
 
-There are two modes:
+There are three modes:
 
 - **CLI interactive mode** – for manual use and quick input.
 - **Code mode** – for automated and configurable project generation.
@@ -68,9 +72,10 @@ other = "{{ val }}"
 override = "1"
 
 [[rules]]
-type = "file"
+type = "write"
 path = "{{ dir }}/some.txt"  # if the file exists will be error
 content = "{{ val }} {{ value }} {{ other | pascal_case }} {{ override }} - should be replaced"
+if_exists = "error"
 
 [[rules]]
 type = "replace"
@@ -161,6 +166,23 @@ No temporary TOML config or template file is required.
 }
 ```
 
+Supported rule types:
+
+| Type                                 | Fields                                                                            |
+|--------------------------------------|-----------------------------------------------------------------------------------|
+| `write`                              | `path`, `content`, `if_exists` (`overwrite`, `error`, or `skip`)                  |
+| `delete`                             | `path`                                                                            |
+| `rename` / `move`                    | `from`, `to`                                                                      |
+| `copy`                               | `from`, `to`                                                                      |
+| `mkdir`                              | `path`                                                                            |
+| `chmod`                              | `path`, `mode`                                                                    |
+| `append` / `append_once` / `prepend` | `path`, `content`                                                                 |
+| `insert_before` / `insert_after`     | `path`, `marker`, `content`                                                       |
+| `replace` / `replace_or_append`      | `path`, `replace`, `content`, optional `replace_all`, optional `expected_matches` |
+| `managed_block`                      | `path`, `start_marker`, `end_marker`, `content`                                   |
+
+`replace` is strict by default: when `replace_all` is false or omitted, it fails unless the regex match count equals `expected_matches`, which defaults to `1`.
+
 Supported rule examples:
 
 ```json
@@ -168,37 +190,69 @@ Supported rule examples:
   "config": {
     "rules": [
       {
-        "type": "append",
-        "path": "README.md",
-        "content": "..."
-      }
-    ]
-  }
-}
-```
-
-```json
-{
-  "config": {
-    "rules": [
-      {
-        "type": "prepend",
-        "path": "README.md",
-        "content": "..."
-      }
-    ]
-  }
-}
-```
-
-```json
-{
-  "config": {
-    "rules": [
-      {
-        "type": "file",
+        "type": "write",
         "path": "new/file.rs",
+        "content": "...",
+        "if_exists": "error"
+      }
+    ]
+  }
+}
+```
+
+```json
+{
+  "config": {
+    "rules": [
+      {
+        "type": "append_once",
+        "path": "README.md",
         "content": "..."
+      }
+    ]
+  }
+}
+```
+
+```json
+{
+  "config": {
+    "rules": [
+      {
+        "type": "managed_block",
+        "path": "README.md",
+        "start_marker": "<!-- genify:start -->",
+        "end_marker": "<!-- genify:end -->",
+        "content": "..."
+      }
+    ]
+  }
+}
+```
+
+```json
+{
+  "config": {
+    "rules": [
+      {
+        "type": "insert_after",
+        "path": "README.md",
+        "marker": "## Usage",
+        "content": "..."
+      }
+    ]
+  }
+}
+```
+
+```json
+{
+  "config": {
+    "rules": [
+      {
+        "type": "move",
+        "from": "old/file.rs",
+        "to": "new/file.rs"
       }
     ]
   }

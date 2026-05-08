@@ -19,9 +19,10 @@ fn mcp_can_plan_diff_and_apply_simple_config() {
         },
         "rules": [
             {
-                "type": "file",
+                "type": "write",
                 "path": "out.txt",
-                "content": "Hello {{ name }}"
+                "content": "Hello {{ name }}",
+                "if_exists": "error"
             }
         ]
     });

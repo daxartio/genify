@@ -16,11 +16,38 @@ pub struct Config {
 #[derive(Clone, Deserialize, Serialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Rule {
-    File {
+    Write {
+        path: String,
+        content: String,
+        if_exists: IfExists,
+    },
+    Delete {
+        path: String,
+    },
+    Rename {
+        from: String,
+        to: String,
+    },
+    Move {
+        from: String,
+        to: String,
+    },
+    Copy {
+        from: String,
+        to: String,
+    },
+    Mkdir {
+        path: String,
+    },
+    Chmod {
+        path: String,
+        mode: String,
+    },
+    Append {
         path: String,
         content: String,
     },
-    Append {
+    AppendOnce {
         path: String,
         content: String,
     },
@@ -28,12 +55,50 @@ pub enum Rule {
         path: String,
         content: String,
     },
+    InsertBefore {
+        path: String,
+        marker: String,
+        content: String,
+    },
+    InsertAfter {
+        path: String,
+        marker: String,
+        content: String,
+    },
     Replace {
         path: String,
         #[serde(with = "serde_regex")]
         replace: Regex,
         content: String,
+        #[serde(default)]
+        replace_all: bool,
+        #[serde(default)]
+        expected_matches: Option<usize>,
     },
+    ReplaceOrAppend {
+        path: String,
+        #[serde(with = "serde_regex")]
+        replace: Regex,
+        content: String,
+        #[serde(default)]
+        replace_all: bool,
+        #[serde(default)]
+        expected_matches: Option<usize>,
+    },
+    ManagedBlock {
+        path: String,
+        start_marker: String,
+        end_marker: String,
+        content: String,
+    },
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IfExists {
+    Overwrite,
+    Error,
+    Skip,
 }
 
 pub type Array = Vec<Value>;

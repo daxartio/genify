@@ -52,10 +52,10 @@ enum ConfigPath {
 
 impl From<&str> for ConfigPath {
     fn from(value: &str) -> Self {
-        if let Ok(url) = Url::parse(value) {
-            if url.scheme() == "http" || url.scheme() == "https" {
-                return Self::Http(url);
-            }
+        if let Ok(url) = Url::parse(value)
+            && (url.scheme() == "http" || url.scheme() == "https")
+        {
+            return Self::Http(url);
         }
         Self::File(value.to_string())
     }
@@ -125,24 +125,24 @@ fn main() {
                 }
             }
             genify::Value::Integer(i) => {
-                if let Some(new) = prompt(&i.to_string()) {
-                    if let Ok(parsed) = new.parse::<i64>() {
-                        *v = genify::Value::Integer(parsed);
-                    }
+                if let Some(new) = prompt(&i.to_string())
+                    && let Ok(parsed) = new.parse::<i64>()
+                {
+                    *v = genify::Value::Integer(parsed);
                 }
             }
             genify::Value::Float(f) => {
-                if let Some(new) = prompt(&f.to_string()) {
-                    if let Ok(parsed) = new.parse::<f64>() {
-                        *v = genify::Value::Float(parsed);
-                    }
+                if let Some(new) = prompt(&f.to_string())
+                    && let Ok(parsed) = new.parse::<f64>()
+                {
+                    *v = genify::Value::Float(parsed);
                 }
             }
             genify::Value::Boolean(b) => {
-                if let Some(new) = prompt(&b.to_string()) {
-                    if let Ok(parsed) = new.parse::<bool>() {
-                        *v = genify::Value::Boolean(parsed);
-                    }
+                if let Some(new) = prompt(&b.to_string())
+                    && let Ok(parsed) = new.parse::<bool>()
+                {
+                    *v = genify::Value::Boolean(parsed);
                 }
             }
             genify::Value::Array(_) | genify::Value::Map(_) => {

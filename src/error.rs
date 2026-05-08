@@ -4,4 +4,6 @@ pub enum Error {
     Tera(tera::Error),
     #[error("I/O error: {0}")]
     IOError(std::io::Error),
+    #[error("{0}")]
+    Operation(String),
 }

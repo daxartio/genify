@@ -3,8 +3,8 @@ use std::{path::Path, sync::Arc};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
     model::{
-        CallToolRequestParams, CallToolResult, Content, Implementation, JsonObject,
-        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+        JsonObject, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
         ToolAnnotations,
     },
     service::{RequestContext, ServerInitializeError},
@@ -34,6 +34,7 @@ pub fn serve_stdio(root: impl AsRef<Path>, read_only: bool) -> Result<(), Server
     let core = GenerationCore::with_read_only(root, read_only)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
+        .enable_time()
         .build()?;
 
     runtime.block_on(async move {
@@ -56,7 +57,10 @@ impl GenifyMcpServer {
         Self { core }
     }
 
-    fn call_genify_tool(&self, request: CallToolRequestParams) -> Result<CallToolResult, McpError> {
+    fn call_genify_tool(
+        &self,
+        request: CallToolRequestParams,
+    ) -> Result<CallToolResponse, McpError> {
         let arguments = request
             .arguments
             .map(JsonValue::Object)
@@ -106,7 +110,7 @@ impl GenifyMcpServer {
         arguments: JsonValue,
         default_is_error: bool,
         f: impl FnOnce(&GenerationCore, JsonValue) -> Result<T, JsonValue>,
-    ) -> CallToolResult
+    ) -> CallToolResponse
     where
         T: Into<JsonValueOrErrorFlag>,
     {
@@ -135,7 +139,7 @@ impl ServerHandler for GenifyMcpServer {
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         self.call_genify_tool(request)
     }
 
@@ -233,17 +237,17 @@ fn core_error_kind(err: &CoreError) -> &'static str {
     }
 }
 
-fn tool_result(structured_content: JsonValue, is_error: bool) -> CallToolResult {
+fn tool_result(structured_content: JsonValue, is_error: bool) -> CallToolResponse {
     let text = serde_json::to_string_pretty(&structured_content)
         .unwrap_or_else(|_| "{\"error\":\"failed to serialize tool result\"}".to_string());
 
     let mut result = if is_error {
-        CallToolResult::error(vec![Content::text(text)])
+        CallToolResult::error(vec![ContentBlock::text(text)])
     } else {
-        CallToolResult::success(vec![Content::text(text)])
+        CallToolResult::success(vec![ContentBlock::text(text)])
     };
     result.structured_content = Some(structured_content);
-    result
+    CallToolResponse::Complete(result)
 }
 
 fn tools() -> Vec<Tool> {
@@ -272,7 +276,8 @@ fn tools() -> Vec<Tool> {
             "genify_apply",
             "Apply genify changes",
             tool_description(
-                "Apply generated changes to disk. Requires explicit_approval=true or confirm_token=\"apply\".",
+                "Apply generated changes to disk. Requires explicit_approval=true or \
+                 confirm_token=\"apply\".",
             ),
             apply_input_schema(),
             Some(apply_output_schema()),
@@ -282,7 +287,8 @@ fn tools() -> Vec<Tool> {
             "genify_validate_config",
             "Validate genify config",
             tool_description(
-                "Validate a JSON genify config and rendered output paths without applying changes. Invalid input returns hint.minimal_config and operation examples.",
+                "Validate a JSON genify config and rendered output paths without applying \
+                 changes. Invalid input returns hint.minimal_config and operation examples.",
             ),
             validate_config_input_schema(),
             Some(validate_config_output_schema()),

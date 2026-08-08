@@ -1992,8 +1992,9 @@ fn config_hint() -> ConfigHint {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
 
     #[test]
     fn rejects_path_traversal_outside_root() {

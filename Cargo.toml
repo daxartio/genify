@@ -10,11 +10,11 @@ license = "MIT"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = { version = "4.5", features = ["derive"], optional = true }
+clap = { version = "4.6", features = ["derive"], optional = true }
 reqwest = { version = "0.13", features = ["blocking"], optional = true }
 url = { version = "2", optional = true }
 
-rmcp = { version = "1.6.0", default-features = false, features = ["server", "transport-io"], optional = true }
+rmcp = { version = "3.1.2", default-features = false, features = ["server", "transport-io"], optional = true }
 tokio = { version = "1.48", features = ["io-std", "rt", "net"], optional = true }
 
 convert_case = "0.11"
@@ -23,7 +23,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_regex = "1.1.0"
 serde_json = "1.0"
 similar = "3.1"
-tera = "1.20"
+tera = "2.1"
 thiserror = "2.0"
 toml = { version = "1.1", features = ["preserve_order"] }
 

@@ -1,0 +1,4 @@
+avoid-breaking-exported-api = true
+cognitive-complexity-threshold = 5
+too-many-arguments-threshold = 4
+type-complexity-threshold = 250

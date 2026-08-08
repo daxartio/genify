@@ -1,62 +1,118 @@
 use convert_case::{Case, Casing};
-use std::{collections::HashMap, hash::BuildHasher};
-use tera::{Result, Tera, Value, to_value, try_get_value};
+use tera::{Filter, Kwargs, State, Tera, TeraResult};
 
 pub fn register_all(tera: &mut Tera) {
-    tera.register_filter("pascal_case", pascal_case);
-    tera.register_filter("camel_case", camel_case);
-    tera.register_filter("kebab_case", kebab_case);
-    tera.register_filter("snake_case", snake_case);
-    tera.register_filter("title_case", title_case);
-    tera.register_filter("flat_case", flat_case);
-    tera.register_filter("cobol_case", cobol_case);
-    tera.register_filter("train_case", train_case);
+    tera.register_filter("pascal_case", PascalCaseFilter);
+    tera.register_filter("camel_case", CamelCaseFilter);
+    tera.register_filter("kebab_case", KebabCaseFilter);
+    tera.register_filter("snake_case", SnakeCaseFilter);
+    tera.register_filter("title_case", TitleCaseFilter);
+    tera.register_filter("flat_case", FlatCaseFilter);
+    tera.register_filter("cobol_case", CobolCaseFilter);
+    tera.register_filter("train_case", TrainCaseFilter);
 }
 
-fn pascal_case<S: BuildHasher>(value: &Value, _: &HashMap<String, Value, S>) -> Result<Value> {
-    let s = try_get_value!("pascal_case", "value", String, value);
-    Ok(to_value(s.to_case(Case::Pascal)).unwrap())
+struct PascalCaseFilter;
+
+impl Filter<String, TeraResult<String>> for PascalCaseFilter {
+    fn call(&self, value: String, _kwargs: Kwargs, _state: &State) -> TeraResult<String> {
+        Ok(value.to_case(Case::Pascal))
+    }
+
+    fn is_safe(&self) -> bool {
+        false
+    }
 }
 
-fn camel_case<S: BuildHasher>(value: &Value, _: &HashMap<String, Value, S>) -> Result<Value> {
-    let s = try_get_value!("camel_case", "value", String, value);
-    Ok(to_value(s.to_case(Case::Camel)).unwrap())
+struct CamelCaseFilter;
+
+impl Filter<String, TeraResult<String>> for CamelCaseFilter {
+    fn call(&self, value: String, _kwargs: Kwargs, _state: &State) -> TeraResult<String> {
+        Ok(value.to_case(Case::Camel))
+    }
+
+    fn is_safe(&self) -> bool {
+        false
+    }
 }
 
-fn kebab_case<S: BuildHasher>(value: &Value, _: &HashMap<String, Value, S>) -> Result<Value> {
-    let s = try_get_value!("kebab_case", "value", String, value);
-    Ok(to_value(s.to_case(Case::Kebab)).unwrap())
+struct KebabCaseFilter;
+
+impl Filter<String, TeraResult<String>> for KebabCaseFilter {
+    fn call(&self, value: String, _kwargs: Kwargs, _state: &State) -> TeraResult<String> {
+        Ok(value.to_case(Case::Kebab))
+    }
+
+    fn is_safe(&self) -> bool {
+        false
+    }
 }
 
-fn snake_case<S: BuildHasher>(value: &Value, _: &HashMap<String, Value, S>) -> Result<Value> {
-    let s = try_get_value!("snake_case", "value", String, value);
-    Ok(to_value(s.to_case(Case::Snake)).unwrap())
+struct SnakeCaseFilter;
+
+impl Filter<String, TeraResult<String>> for SnakeCaseFilter {
+    fn call(&self, value: String, _kwargs: Kwargs, _state: &State) -> TeraResult<String> {
+        Ok(value.to_case(Case::Snake))
+    }
+
+    fn is_safe(&self) -> bool {
+        false
+    }
 }
 
-fn title_case<S: BuildHasher>(value: &Value, _: &HashMap<String, Value, S>) -> Result<Value> {
-    let s = try_get_value!("title_case", "value", String, value);
-    Ok(to_value(s.to_case(Case::Title)).unwrap())
+struct TitleCaseFilter;
+
+impl Filter<String, TeraResult<String>> for TitleCaseFilter {
+    fn call(&self, value: String, _kwargs: Kwargs, _state: &State) -> TeraResult<String> {
+        Ok(value.to_case(Case::Title))
+    }
+
+    fn is_safe(&self) -> bool {
+        false
+    }
 }
 
-fn flat_case<S: BuildHasher>(value: &Value, _: &HashMap<String, Value, S>) -> Result<Value> {
-    let s = try_get_value!("flat_case", "value", String, value);
-    Ok(to_value(s.to_case(Case::Flat)).unwrap())
+struct FlatCaseFilter;
+
+impl Filter<String, TeraResult<String>> for FlatCaseFilter {
+    fn call(&self, value: String, _kwargs: Kwargs, _state: &State) -> TeraResult<String> {
+        Ok(value.to_case(Case::Flat))
+    }
+
+    fn is_safe(&self) -> bool {
+        false
+    }
 }
 
-fn cobol_case<S: BuildHasher>(value: &Value, _: &HashMap<String, Value, S>) -> Result<Value> {
-    let s = try_get_value!("cobol_case", "value", String, value);
-    Ok(to_value(s.to_case(Case::Cobol)).unwrap())
+struct CobolCaseFilter;
+
+impl Filter<String, TeraResult<String>> for CobolCaseFilter {
+    fn call(&self, value: String, _kwargs: Kwargs, _state: &State) -> TeraResult<String> {
+        Ok(value.to_case(Case::Cobol))
+    }
+
+    fn is_safe(&self) -> bool {
+        false
+    }
 }
 
-fn train_case<S: BuildHasher>(value: &Value, _: &HashMap<String, Value, S>) -> Result<Value> {
-    let s = try_get_value!("train_case", "value", String, value);
-    Ok(to_value(s.to_case(Case::Train)).unwrap())
+struct TrainCaseFilter;
+
+impl Filter<String, TeraResult<String>> for TrainCaseFilter {
+    fn call(&self, value: String, _kwargs: Kwargs, _state: &State) -> TeraResult<String> {
+        Ok(value.to_case(Case::Train))
+    }
+
+    fn is_safe(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tera::Context;
+
+    use super::*;
 
     #[test]
     fn test() {
@@ -89,7 +145,7 @@ mod tests {
         .join("\n");
 
         let result = tera
-            .render_str(input.as_str(), &context)
+            .render_str(input.as_str(), &context, false)
             .expect("String should be rendered");
 
         assert_eq!(expected, result)

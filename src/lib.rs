@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 mod error;
 pub mod generation;
 #[cfg(feature = "mcp")]
@@ -6,18 +8,17 @@ mod schema;
 mod tera_filters;
 mod toml;
 
-use regex::Regex;
 use std::{
     borrow::Cow,
     fs,
     io::{self, Read, Seek, Write},
     path::Path,
 };
+
+use regex::Regex;
 use tera::{Context, Tera};
 
-pub use crate::error::*;
-pub use crate::schema::*;
-pub use crate::toml::parse_toml;
+pub use crate::{error::*, schema::*, toml::parse_toml};
 
 pub fn generate(root: &Path, config: &Config, overrides: Option<Map>) -> Result<(), Error> {
     let config = config.clone();
@@ -51,10 +52,10 @@ pub fn render_config_props_with_func(
 
     for (key, val) in config.props.iter_mut() {
         if let Value::String(s) = val {
-            *s = tera.render_str(s, &context).map_err(Error::Tera)?;
+            *s = tera.render_str(s, &context, false)?;
         }
         func(key, val);
-        context.insert(key.as_str(), val);
+        context.insert(key.clone(), val);
     }
 
     Ok(config)
@@ -67,7 +68,7 @@ pub fn render_config_rules(mut config: Config) -> Result<Config, Error> {
     let mut context = Context::new();
 
     for (key, val) in config.props.iter_mut() {
-        context.insert(key.as_str(), val);
+        context.insert(key.clone(), val);
     }
 
     for rule in config.rules.iter_mut() {
@@ -142,7 +143,7 @@ pub fn render_config_rules(mut config: Config) -> Result<Config, Error> {
 }
 
 fn render_string(tera: &mut Tera, context: &Context, value: &mut String) -> Result<(), Error> {
-    *value = tera.render_str(value, context).map_err(Error::Tera)?;
+    *value = tera.render_str(value, context, false)?;
     Ok(())
 }
 
@@ -219,23 +220,19 @@ pub fn generate_files(config: Config) -> Result<(), Error> {
                         let mut file = fs::File::options()
                             .create_new(true)
                             .write(true)
-                            .open(path)
-                            .map_err(Error::IOError)?;
-                        writeln!(&mut file, "{}", content.trim_end()).map_err(Error::IOError)?;
+                            .open(path)?;
+                        writeln!(&mut file, "{}", content.trim_end())?;
                     }
                     IfExists::Overwrite => {
-                        fs::write(path, format!("{}\n", content.trim_end()))
-                            .map_err(Error::IOError)?;
+                        fs::write(path, format!("{}\n", content.trim_end()))?;
                     }
                     IfExists::Skip => {
                         if !path.exists() {
                             let mut file = fs::File::options()
                                 .create_new(true)
                                 .write(true)
-                                .open(path)
-                                .map_err(Error::IOError)?;
-                            writeln!(&mut file, "{}", content.trim_end())
-                                .map_err(Error::IOError)?;
+                                .open(path)?;
+                            writeln!(&mut file, "{}", content.trim_end())?;
                         }
                     }
                 }
@@ -243,23 +240,23 @@ pub fn generate_files(config: Config) -> Result<(), Error> {
             Rule::Delete { path } => {
                 let path = Path::new(path);
                 if path.is_dir() {
-                    fs::remove_dir_all(path).map_err(Error::IOError)?;
+                    fs::remove_dir_all(path)?;
                 } else if path.exists() {
-                    fs::remove_file(path).map_err(Error::IOError)?;
+                    fs::remove_file(path)?;
                 }
             }
             Rule::Rename { from, to } | Rule::Move { from, to } => {
                 let to = Path::new(to);
                 create_dir_all(to)?;
-                fs::rename(from, to).map_err(Error::IOError)?;
+                fs::rename(from, to)?;
             }
             Rule::Copy { from, to } => {
                 let to = Path::new(to);
                 create_dir_all(to)?;
-                fs::copy(from, to).map_err(Error::IOError)?;
+                fs::copy(from, to)?;
             }
             Rule::Mkdir { path } => {
-                fs::create_dir_all(path).map_err(Error::IOError)?;
+                fs::create_dir_all(path)?;
             }
             Rule::Chmod { path, mode } => {
                 set_mode(Path::new(path), parse_mode(mode)?)?;
@@ -267,13 +264,9 @@ pub fn generate_files(config: Config) -> Result<(), Error> {
             Rule::Append { path, content } => {
                 let path = Path::new(path);
                 create_dir_all(path)?;
-                let mut file = fs::File::options()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .map_err(Error::IOError)?;
+                let mut file = fs::File::options().create(true).append(true).open(path)?;
 
-                writeln!(&mut file, "{}", content.trim_end()).map_err(Error::IOError)?;
+                writeln!(&mut file, "{}", content.trim_end())?;
             }
             Rule::AppendOnce { path, content } => {
                 let path = Path::new(path);
@@ -282,7 +275,7 @@ pub fn generate_files(config: Config) -> Result<(), Error> {
                 let block = content.trim_end();
                 if !file_content.contains(block) {
                     file_content.push_str(&format!("{}\n", block));
-                    fs::write(path, file_content).map_err(Error::IOError)?;
+                    fs::write(path, file_content)?;
                 }
             }
             Rule::Prepend { path, content } => {
@@ -293,15 +286,12 @@ pub fn generate_files(config: Config) -> Result<(), Error> {
                     .truncate(false)
                     .read(true)
                     .write(true)
-                    .open(path)
-                    .map_err(Error::IOError)?;
+                    .open(path)?;
                 let mut file_content = String::new();
-                file.read_to_string(&mut file_content)
-                    .map_err(Error::IOError)?;
-                file.seek(io::SeekFrom::Start(0)).map_err(Error::IOError)?;
+                file.read_to_string(&mut file_content)?;
+                file.seek(io::SeekFrom::Start(0))?;
 
-                writeln!(&mut file, "{}\n{}", content, file_content.trim_end())
-                    .map_err(Error::IOError)?;
+                writeln!(&mut file, "{}\n{}", content, file_content.trim_end())?;
             }
             Rule::InsertBefore {
                 path,
@@ -313,7 +303,7 @@ pub fn generate_files(config: Config) -> Result<(), Error> {
                 let file_content = read_file_or_empty(path)?;
                 let updated = insert_before(&file_content, marker, content)
                     .ok_or_else(|| Error::Operation(format!("marker not found: {marker}")))?;
-                fs::write(path, updated).map_err(Error::IOError)?;
+                fs::write(path, updated)?;
             }
             Rule::InsertAfter {
                 path,
@@ -325,7 +315,7 @@ pub fn generate_files(config: Config) -> Result<(), Error> {
                 let file_content = read_file_or_empty(path)?;
                 let updated = insert_after(&file_content, marker, content)
                     .ok_or_else(|| Error::Operation(format!("marker not found: {marker}")))?;
-                fs::write(path, updated).map_err(Error::IOError)?;
+                fs::write(path, updated)?;
             }
             Rule::Replace {
                 path,
@@ -344,7 +334,7 @@ pub fn generate_files(config: Config) -> Result<(), Error> {
                     *replace_all,
                     *expected_matches,
                 )?;
-                fs::write(path, format!("{}\n", replaced.trim_end())).map_err(Error::IOError)?;
+                fs::write(path, format!("{}\n", replaced.trim_end()))?;
             }
             Rule::ReplaceOrAppend {
                 path,
@@ -368,7 +358,7 @@ pub fn generate_files(config: Config) -> Result<(), Error> {
                 } else {
                     format!("{}{}\n", file_content, content.trim_end())
                 };
-                fs::write(path, format!("{}\n", updated.trim_end())).map_err(Error::IOError)?;
+                fs::write(path, format!("{}\n", updated.trim_end()))?;
             }
             Rule::ManagedBlock {
                 path,
@@ -381,7 +371,7 @@ pub fn generate_files(config: Config) -> Result<(), Error> {
                 let file_content = read_file_or_empty(path)?;
                 let updated =
                     upsert_managed_block(&file_content, start_marker, end_marker, content)?;
-                fs::write(path, format!("{}\n", updated.trim_end())).map_err(Error::IOError)?;
+                fs::write(path, format!("{}\n", updated.trim_end()))?;
             }
         }
     }
@@ -393,7 +383,7 @@ fn create_dir_all(path: &Path) -> Result<(), Error> {
         return Ok(());
     };
 
-    fs::create_dir_all(parent).map_err(Error::IOError)
+    Ok(fs::create_dir_all(parent)?)
 }
 
 fn read_file_or_empty(path: &Path) -> Result<String, Error> {
@@ -483,7 +473,7 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), Error> {
     use std::os::unix::fs::PermissionsExt;
 
     let permissions = fs::Permissions::from_mode(mode);
-    fs::set_permissions(path, permissions).map_err(Error::IOError)
+    Ok(fs::set_permissions(path, permissions)?)
 }
 
 #[cfg(not(unix))]

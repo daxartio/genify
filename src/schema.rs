@@ -181,8 +181,9 @@ fn map_from_json(map: JsonMap<String, JsonValue>) -> Result<Map, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn converts_json_array() {
